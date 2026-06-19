@@ -191,6 +191,10 @@ On Apple Silicon, typical behavior after model load:
 
 macOS may show the ONNX model as resident memory after recent use. Much of it is memory-mapped and can be reclaimed/compressed by the OS when idle.
 
+## GUI Packaging Roadmap
+
+See [`docs/GUI_PACKAGING_ROADMAP.md`](docs/GUI_PACKAGING_ROADMAP.md) for the path from this LaunchAgent prototype to a signed macOS menu-bar app and eventually a Windows tray app.
+
 ## Privacy
 
 The daemon loads a local model from disk and runs inference locally through ONNX Runtime.
