@@ -42,13 +42,16 @@ MODEL_FILES = [
 
 DEFAULT_CONFIG = {
     "hotkey": "cmd+option",
+    "lock_hotkey": "ctrl+cmd+option",
     "sample_rate": 16000,
     "paste_into_active_app": True,
-    "copy_to_clipboard": True,
+    "copy_to_clipboard": False,
+    "preserve_clipboard": True,
+    "clipboard_restore_delay_seconds": 0.35,
     "min_recording_seconds": 0.25,
-    "window_width": 270,
-    "window_height": 58,
-    "window_bottom_margin": 88,
+    "window_width": 230,
+    "window_height": 44,
+    "window_bottom_margin": 94,
     "vad_enabled": True,
     "vad_aggressiveness": 2,
     "vad_frame_ms": 20,
@@ -106,6 +109,13 @@ def install_runtime_files() -> None:
     config_path = APP_DIR / "config.json"
     if not config_path.exists():
         config_path.write_text(json.dumps(DEFAULT_CONFIG, indent=2) + "\n", encoding="utf-8")
+    else:
+        existing = json.loads(config_path.read_text(encoding="utf-8"))
+        config = dict(DEFAULT_CONFIG)
+        config.update(existing)
+        if "preserve_clipboard" not in existing and config.get("paste_into_active_app", True):
+            config["copy_to_clipboard"] = False
+        config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
 
 def install_command() -> None:
@@ -151,6 +161,9 @@ case "${{1:-start}}" in
   run)
     MACOS_LOCAL_ASR_APP_DIR="{APP_DIR}" exec "$PYTHON" "$DAEMON"
     ;;
+  test-ui)
+    MACOS_LOCAL_ASR_APP_DIR="{APP_DIR}" exec "$PYTHON" "$DAEMON" --test-ui
+    ;;
   uninstall)
     launchctl bootout "$DOMAIN" "$PLIST" 2>/dev/null || true
     rm -f "$PLIST"
@@ -159,7 +172,7 @@ case "${{1:-start}}" in
     echo "Removed macOS-localASR."
     ;;
   *)
-    echo "Usage: macos-local-asr [start|stop|restart|status|logs|permissions|run|uninstall]"
+    echo "Usage: macos-local-asr [start|stop|restart|status|logs|permissions|run|test-ui|uninstall]"
     exit 2
     ;;
 esac
@@ -225,6 +238,7 @@ def main() -> None:
     print(f"Command: {BIN_PATH}")
     print(f"LaunchAgent: {PLIST_PATH}")
     print("Default push-to-talk hotkey: hold Command + Option")
+    print("Default lock-mode hotkey: press Control + Command + Option, then press Escape to transcribe")
     print("Run `macos-local-asr permissions` and grant Microphone, Accessibility, and Input Monitoring.")
 
 

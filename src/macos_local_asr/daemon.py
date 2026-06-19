@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -26,13 +27,18 @@ from AppKit import (
     NSMakePoint,
     NSMakeRect,
     NSPanel,
+    NSPasteboard,
+    NSPasteboardItem,
+    NSPasteboardTypeString,
     NSScreen,
     NSScreenSaverWindowLevel,
     NSTimer,
     NSView,
     NSWindowCollectionBehaviorCanJoinAllSpaces,
     NSWindowCollectionBehaviorFullScreenAuxiliary,
+    NSWindowCollectionBehaviorIgnoresCycle,
     NSWindowCollectionBehaviorStationary,
+    NSWindowCollectionBehaviorTransient,
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskNonactivatingPanel,
     NSWorkspace,
@@ -50,6 +56,7 @@ from Quartz import (
     kCFRunLoopCommonModes,
     kCGEventFlagMaskAlternate,
     kCGEventFlagMaskCommand,
+    kCGEventFlagMaskControl,
     kCGEventFlagsChanged,
     kCGEventKeyDown,
     kCGEventTapDisabledByTimeout,
@@ -59,6 +66,7 @@ from Quartz import (
     kCGKeyboardEventKeycode,
     kCGSessionEventTap,
 )
+from Foundation import NSData
 
 
 APP_DIR = Path(
@@ -81,13 +89,16 @@ KEY_ESC = 53
 
 DEFAULT_CONFIG = {
     "hotkey": "cmd+option",
+    "lock_hotkey": "ctrl+cmd+option",
     "sample_rate": 16000,
     "paste_into_active_app": True,
-    "copy_to_clipboard": True,
+    "copy_to_clipboard": False,
+    "preserve_clipboard": True,
+    "clipboard_restore_delay_seconds": 0.35,
     "min_recording_seconds": 0.25,
-    "window_width": 270,
-    "window_height": 58,
-    "window_bottom_margin": 88,
+    "window_width": 230,
+    "window_height": 44,
+    "window_bottom_margin": 94,
     "vad_enabled": True,
     "vad_aggressiveness": 2,
     "vad_frame_ms": 20,
@@ -148,6 +159,11 @@ def normalize_key(name: str) -> str:
         "option": "option",
         "command": "cmd",
         "cmd": "cmd",
+        "control": "ctrl",
+        "ctrl": "ctrl",
+        "key.ctrl": "ctrl",
+        "key.ctrl_l": "ctrl",
+        "key.ctrl_r": "ctrl",
     }
     return aliases.get(normalized, normalized)
 
@@ -157,8 +173,8 @@ def parse_hotkey(value: str) -> frozenset[str]:
 
 
 def hotkey_label(keys: set[str] | frozenset[str]) -> str:
-    labels = {"cmd": "Command", "option": "Option"}
-    ordered = [key for key in ("cmd", "option") if key in keys]
+    labels = {"cmd": "Command", "option": "Option", "ctrl": "Control"}
+    ordered = [key for key in ("ctrl", "cmd", "option") if key in keys]
     ordered.extend(sorted(keys.difference(ordered)))
     return " + ".join(labels.get(key, key) for key in ordered)
 
@@ -238,8 +254,49 @@ def trim_audio_with_vad(audio: np.ndarray, sample_rate: int, config: dict[str, A
     )
 
 
+ClipboardSnapshot = list[list[tuple[str, bytes]]]
+
+
+def capture_clipboard() -> ClipboardSnapshot | None:
+    try:
+        snapshot: ClipboardSnapshot = []
+        for item in NSPasteboard.generalPasteboard().pasteboardItems() or []:
+            item_data: list[tuple[str, bytes]] = []
+            for data_type in item.types() or []:
+                data = item.dataForType_(data_type)
+                if data is not None:
+                    item_data.append((str(data_type), bytes(data)))
+            if item_data:
+                snapshot.append(item_data)
+        return snapshot
+    except Exception as exc:  # noqa: BLE001
+        log(f"clipboard capture failed: {exc}")
+        return None
+
+
+def restore_clipboard(snapshot: ClipboardSnapshot | None) -> None:
+    if snapshot is None:
+        return
+    try:
+        pasteboard = NSPasteboard.generalPasteboard()
+        pasteboard.clearContents()
+        if not snapshot:
+            return
+        restored_items = []
+        for item_data in snapshot:
+            item = NSPasteboardItem.alloc().init()
+            for data_type, payload in item_data:
+                item.setData_forType_(NSData.dataWithBytes_length_(payload, len(payload)), data_type)
+            restored_items.append(item)
+        pasteboard.writeObjects_(restored_items)
+    except Exception as exc:  # noqa: BLE001
+        log(f"clipboard restore failed: {exc}")
+
+
 def set_clipboard(text: str) -> None:
-    subprocess.run(["pbcopy"], input=text, text=True, check=False)
+    pasteboard = NSPasteboard.generalPasteboard()
+    pasteboard.clearContents()
+    pasteboard.setString_forType_(text, NSPasteboardTypeString)
 
 
 def paste_clipboard(target_bundle_id: str | None = None) -> None:
@@ -254,6 +311,16 @@ def paste_clipboard(target_bundle_id: str | None = None) -> None:
     subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
 
 
+def paste_text(text: str, target_bundle_id: str | None, config: dict[str, Any]) -> None:
+    preserve = bool(config.get("preserve_clipboard", True))
+    snapshot = capture_clipboard() if preserve else None
+    set_clipboard(text)
+    paste_clipboard(target_bundle_id)
+    if preserve:
+        time.sleep(max(0.0, float(config.get("clipboard_restore_delay_seconds", 0.35))))
+        restore_clipboard(snapshot)
+
+
 class WaveformView(NSView):
     def drawRect_(self, _rect: Any) -> None:
         widget = getattr(self, "widget", None)
@@ -265,17 +332,17 @@ class WaveformView(NSView):
         NSColor.clearColor().setFill()
         NSBezierPath.bezierPathWithRect_(NSMakeRect(0, 0, width, height)).fill()
 
-        pill_rect = NSMakeRect(1.5, 1.5, width - 3.0, height - 3.0)
-        pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(pill_rect, 20.0, 20.0)
-        NSColor.colorWithCalibratedRed_green_blue_alpha_(0.02, 0.02, 0.025, 0.90).setFill()
+        pill_rect = NSMakeRect(1.0, 1.0, width - 2.0, height - 2.0)
+        pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(pill_rect, 15.0, 15.0)
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(0.015, 0.015, 0.02, 0.88).setFill()
         pill.fill()
-        NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.12).setStroke()
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.10).setStroke()
         pill.setLineWidth_(1.0)
         pill.stroke()
 
-        bars = 30
-        bar_width = 4.4
-        gap = 3.6
+        bars = 26
+        bar_width = 3.6
+        gap = 3.2
         total_width = bars * bar_width + (bars - 1) * gap
         start_x = (width - total_width) / 2.0
         center_y = height / 2.0
@@ -283,23 +350,29 @@ class WaveformView(NSView):
         for idx in range(bars):
             t = idx / max(1, bars - 1)
             phase = widget.phase * 0.11 + idx * 0.34
-            if widget.mode == "recording":
-                motion = 0.42 + 0.58 * ((np.sin(phase) + 1.0) / 2.0)
-                center_weight = 0.72 + 0.28 * np.sin(np.pi * t)
-                bar_height = 5.0 + widget.smooth_level * (12.0 + 24.0 * motion * center_weight)
+            if widget.mode in {"recording", "locked"}:
+                motion = 0.35 + 0.65 * ((np.sin(phase) + 1.0) / 2.0)
+                center_weight = 0.66 + 0.34 * np.sin(np.pi * t)
+                lock_lift = 0.10 if widget.mode == "locked" else 0.0
+                bar_height = 4.0 + (widget.smooth_level + lock_lift) * (9.0 + 18.0 * motion * center_weight)
             elif widget.mode == "transcribing":
                 motion = 0.25 + 0.75 * ((np.sin(phase * 1.45) + 1.0) / 2.0)
-                bar_height = 5.0 + 14.0 * motion
+                bar_height = 4.0 + 10.0 * motion
             else:
-                bar_height = 5.0
+                bar_height = 4.0
 
-            red = 0.52 + 0.14 * t
-            green = 0.82 - 0.24 * t
-            blue = 1.0
+            if widget.mode == "locked":
+                red = 0.62 + 0.20 * t
+                green = 0.78 - 0.30 * t
+                blue = 1.0
+            else:
+                red = 0.52 + 0.14 * t
+                green = 0.82 - 0.24 * t
+                blue = 1.0
             color = NSColor.colorWithCalibratedRed_green_blue_alpha_(red, green, blue, 0.96)
             x = start_x + idx * (bar_width + gap)
             bar_rect = NSMakeRect(x, center_y - bar_height / 2.0, bar_width, bar_height)
-            bar = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(bar_rect, 2.2, 2.2)
+            bar = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(bar_rect, 1.8, 1.8)
             color.setFill()
             bar.fill()
 
@@ -333,7 +406,9 @@ class FloatingWidget:
         self.panel.setCollectionBehavior_(
             NSWindowCollectionBehaviorCanJoinAllSpaces
             | NSWindowCollectionBehaviorFullScreenAuxiliary
+            | NSWindowCollectionBehaviorIgnoresCycle
             | NSWindowCollectionBehaviorStationary
+            | NSWindowCollectionBehaviorTransient
         )
         self.panel.setBackgroundColor_(NSColor.clearColor())
         self.panel.setOpaque_(False)
@@ -341,6 +416,10 @@ class FloatingWidget:
         self.panel.setIgnoresMouseEvents_(True)
         self.panel.setHidesOnDeactivate_(False)
         self.panel.setReleasedWhenClosed_(False)
+        if hasattr(self.panel, "setFloatingPanel_"):
+            self.panel.setFloatingPanel_(True)
+        if hasattr(self.panel, "setWorksWhenModal_"):
+            self.panel.setWorksWhenModal_(True)
 
         self.view = WaveformView.alloc().initWithFrame_(NSMakeRect(0, 0, self.width, self.height))
         self.view.widget = self
@@ -367,7 +446,10 @@ class FloatingWidget:
             had_pending = True
             if level is not None:
                 self.target_level = max(0.0, min(1.0, level))
-            if status.startswith("Recording"):
+            if status.startswith("Locked recording"):
+                self.mode = "locked"
+                self.show()
+            elif status.startswith("Recording"):
                 self.mode = "recording"
                 self.show()
             elif status.startswith("Transcribing") or status.startswith("Error"):
@@ -381,9 +463,9 @@ class FloatingWidget:
             return
 
         self.phase = (self.phase + 1.0) % 10000.0
-        target = self.target_level if self.mode == "recording" else 0.0
+        target = self.target_level if self.mode in {"recording", "locked"} else 0.0
         self.smooth_level = self.smooth_level * 0.82 + target * 0.18
-        if self.mode == "recording":
+        if self.mode in {"recording", "locked"}:
             self.smooth_level = max(0.16, self.smooth_level)
         self.view.setNeedsDisplay_(True)
 
@@ -405,6 +487,7 @@ class FloatingWidget:
         bottom_margin = min(max(float(self.config["window_bottom_margin"]), 48.0), visible.size.height * 0.35)
         y = visible.origin.y + bottom_margin
         self.panel.setFrameOrigin_(NSMakePoint(x, y))
+        log(f"widget placed at x={x:.0f}, y={y:.0f}, screen={visible.size.width:.0f}x{visible.size.height:.0f}")
 
     def show(self) -> None:
         if not self.visible:
@@ -412,11 +495,13 @@ class FloatingWidget:
             self.panel.setAlphaValue_(0.94)
             self.panel.orderFrontRegardless()
             self.visible = True
+            log("widget shown")
 
     def hide(self) -> None:
         if self.visible:
             self.panel.orderOut_(None)
             self.visible = False
+            log("widget hidden")
 
     def mainloop(self) -> None:
         self.app.run()
@@ -427,8 +512,12 @@ class DictationDaemon:
         self.widget = widget
         self.config = config
         self.hotkey = parse_hotkey(str(config["hotkey"]))
+        self.lock_hotkey = parse_hotkey(str(config.get("lock_hotkey", "ctrl+cmd+option")))
         self.hotkey_text = hotkey_label(self.hotkey)
+        self.lock_hotkey_text = hotkey_label(self.lock_hotkey)
         self.trigger_active = False
+        self.lock_trigger_active = False
+        self.recording_locked = False
         self.event_tap = None
         self.sample_rate = int(config["sample_rate"])
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -492,7 +581,10 @@ class DictationDaemon:
             if event_type == kCGEventKeyDown:
                 keycode = int(CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode))
                 if keycode == KEY_ESC and self.recording is not None:
-                    self.cancel_current = True
+                    if self.recording_locked:
+                        self.recording_locked = False
+                    else:
+                        self.cancel_current = True
                     self.events.put(("stop", None))
                     return None
                 return event
@@ -504,11 +596,33 @@ class DictationDaemon:
                     pressed.add("cmd")
                 if flags & int(kCGEventFlagMaskAlternate):
                     pressed.add("option")
+                if flags & int(kCGEventFlagMaskControl):
+                    pressed.add("ctrl")
 
-                if self.hotkey.issubset(pressed) and not self.trigger_active:
+                lock_down = self.lock_hotkey.issubset(pressed)
+                hold_down = self.hotkey.issubset(pressed)
+
+                if lock_down and not self.lock_trigger_active:
+                    self.lock_trigger_active = True
+                    self.recording_locked = True
+                    if self.recording is None and not self.trigger_active:
+                        self.events.put(("start", {"locked": True}))
+                    else:
+                        self.events.put(("lock", None))
+                    return event
+
+                if self.lock_trigger_active and not lock_down:
+                    self.lock_trigger_active = False
+
+                if self.recording_locked:
+                    if not hold_down:
+                        self.trigger_active = False
+                    return event
+
+                if hold_down and not self.trigger_active:
                     self.trigger_active = True
-                    self.events.put(("start", None))
-                elif self.trigger_active and not self.hotkey.issubset(pressed):
+                    self.events.put(("start", {"locked": False}))
+                elif self.trigger_active and not hold_down:
                     self.trigger_active = False
                     self.events.put(("stop", None))
 
@@ -522,18 +636,25 @@ class DictationDaemon:
             action, payload = self.events.get()
             try:
                 if action == "start":
-                    self.start_recording()
+                    locked = bool(payload.get("locked")) if isinstance(payload, dict) else False
+                    self.start_recording(locked=locked)
+                elif action == "lock":
+                    self.lock_recording()
                 elif action == "stop":
                     self.stop_recording()
             except Exception as exc:  # noqa: BLE001
                 log(f"{action} failed: {exc}")
                 self.widget.set_state("Error", str(exc))
 
-    def start_recording(self) -> None:
+    def start_recording(self, locked: bool = False) -> None:
         with self.lock:
             if self.recording is not None:
+                if locked:
+                    self.recording_locked = True
+                    self.widget.set_state("Locked recording...", "Esc to transcribe", 0.0)
                 return
             self.cancel_current = False
+            self.recording_locked = locked
             target_app = NSWorkspace.sharedWorkspace().frontmostApplication()
             self.target_bundle_id = str(target_app.bundleIdentifier()) if target_app is not None else None
             frames: list[np.ndarray] = []
@@ -545,7 +666,8 @@ class DictationDaemon:
                 mono = indata[:, 0].copy()
                 frames.append(mono)
                 rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size else 0.0
-                self.widget.set_state("Recording...", level=min(1.0, rms * 24))
+                status_text = "Locked recording..." if self.recording_locked else "Recording..."
+                self.widget.set_state(status_text, level=min(1.0, rms * 24))
 
             self.stream = sd.InputStream(
                 samplerate=self.sample_rate,
@@ -554,8 +676,19 @@ class DictationDaemon:
                 callback=callback,
             )
             self.stream.start()
-            log("recording started")
-            self.widget.set_state("Recording...", "Release hotkey to transcribe", 0.0)
+            log(f"recording started locked={locked}")
+            if locked:
+                self.widget.set_state("Locked recording...", "Esc to transcribe", 0.0)
+            else:
+                self.widget.set_state("Recording...", "Release hotkey to transcribe", 0.0)
+
+    def lock_recording(self) -> None:
+        with self.lock:
+            if self.recording is None:
+                return
+            self.recording_locked = True
+        log("recording locked")
+        self.widget.set_state("Locked recording...", "Esc to transcribe", 0.0)
 
     def stop_recording(self) -> None:
         with self.lock:
@@ -563,6 +696,8 @@ class DictationDaemon:
             stream = self.stream
             self.recording = None
             self.stream = None
+            was_locked = self.recording_locked
+            self.recording_locked = False
         if recording is None:
             return
         if stream is not None:
@@ -571,7 +706,7 @@ class DictationDaemon:
 
         duration = time.perf_counter() - recording.started_at
         if self.cancel_current:
-            log("recording cancelled")
+            log(f"recording cancelled locked={was_locked}")
             self.widget.set_state(f"Ready. Hold {self.hotkey_text}", "Cancelled", 0.0)
             return
         if duration < float(self.config["min_recording_seconds"]):
@@ -620,10 +755,10 @@ class DictationDaemon:
         text = str(result).strip()
         if text:
             log(f"transcription complete: {audio_sec:.2f}s audio, {elapsed:.2f}s latency, words={len(text.split())}")
-            if self.config.get("copy_to_clipboard", True):
-                set_clipboard(text)
             if self.config.get("paste_into_active_app", True):
-                paste_clipboard(self.target_bundle_id)
+                paste_text(text, self.target_bundle_id, self.config)
+            elif self.config.get("copy_to_clipboard", False):
+                set_clipboard(text)
             self.write_history(text, duration, audio_sec, elapsed, vad_stats)
             self.widget.set_state(f"Ready. Hold {self.hotkey_text}", f"Pasted {len(text.split())} words in {elapsed:.2f}s", 0.0)
         else:
@@ -660,6 +795,27 @@ class DictationDaemon:
 
 
 def main() -> None:
+    if "--test-ui" in sys.argv:
+        config = load_config()
+        widget = FloatingWidget(config)
+
+        def drive_widget() -> None:
+            started = time.perf_counter()
+            while time.perf_counter() - started < 5.0:
+                elapsed = time.perf_counter() - started
+                level = 0.25 + 0.55 * ((np.sin(elapsed * 5.0) + 1.0) / 2.0)
+                widget.set_state("Recording...", "UI smoke test", float(level))
+                time.sleep(1.0 / 30.0)
+            widget.set_state("Ready. Hold Command + Option", "UI smoke test complete", 0.0)
+            time.sleep(0.25)
+            widget.app.performSelectorOnMainThread_withObject_waitUntilDone_("terminate:", None, False)
+
+        threading.Thread(target=drive_widget, daemon=True).start()
+        log("ui smoke test started")
+        widget.mainloop()
+        log("ui smoke test ended")
+        return
+
     if not MODEL_DIR.exists():
         raise SystemExit(f"Missing model directory: {MODEL_DIR}")
     config = load_config()
