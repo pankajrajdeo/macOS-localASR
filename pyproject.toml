@@ -1,0 +1,30 @@
+[project]
+name = "macos-local-asr"
+version = "0.1.0"
+description = "Local system-wide push-to-talk dictation for macOS using ONNX Parakeet ASR."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+  { name = "Pankaj Rajdeo" }
+]
+dependencies = [
+  "numpy==2.4.6",
+  "onnx-asr==0.11.0",
+  "onnxruntime==1.27.0",
+  "pyobjc-framework-Cocoa==12.2.1",
+  "pyobjc-framework-Quartz==12.2.1",
+  "sounddevice==0.5.5",
+  "webrtcvad-wheels==2.0.14",
+]
+
+[project.urls]
+Homepage = "https://github.com/pankajrajdeo/macOS-localASR"
+Repository = "https://github.com/pankajrajdeo/macOS-localASR"
+
+[project.scripts]
+macos-local-asr-daemon = "macos_local_asr.daemon:main"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"

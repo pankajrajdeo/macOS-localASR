@@ -1,0 +1,681 @@
+from __future__ import annotations
+
+import json
+import os
+import queue
+import subprocess
+import tempfile
+import threading
+import time
+import wave
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import onnx_asr
+import sounddevice as sd
+import webrtcvad
+from AppKit import (
+    NSApplication,
+    NSApplicationActivationPolicyAccessory,
+    NSBackingStoreBuffered,
+    NSBezierPath,
+    NSColor,
+    NSEvent,
+    NSMakePoint,
+    NSMakeRect,
+    NSPanel,
+    NSScreen,
+    NSScreenSaverWindowLevel,
+    NSTimer,
+    NSView,
+    NSWindowCollectionBehaviorCanJoinAllSpaces,
+    NSWindowCollectionBehaviorFullScreenAuxiliary,
+    NSWindowCollectionBehaviorStationary,
+    NSWindowStyleMaskBorderless,
+    NSWindowStyleMaskNonactivatingPanel,
+    NSWorkspace,
+)
+from Quartz import (
+    CFMachPortCreateRunLoopSource,
+    CFRunLoopAddSource,
+    CFRunLoopGetCurrent,
+    CFRunLoopRun,
+    CGEventGetFlags,
+    CGEventGetIntegerValueField,
+    CGEventMaskBit,
+    CGEventTapCreate,
+    CGEventTapEnable,
+    kCFRunLoopCommonModes,
+    kCGEventFlagMaskAlternate,
+    kCGEventFlagMaskCommand,
+    kCGEventFlagsChanged,
+    kCGEventKeyDown,
+    kCGEventTapDisabledByTimeout,
+    kCGEventTapDisabledByUserInput,
+    kCGEventTapOptionDefault,
+    kCGHeadInsertEventTap,
+    kCGKeyboardEventKeycode,
+    kCGSessionEventTap,
+)
+
+
+APP_DIR = Path(
+    os.environ.get(
+        "MACOS_LOCAL_ASR_APP_DIR",
+        str(Path.home() / "Library" / "Application Support" / "macOS-localASR"),
+    )
+)
+CONFIG_PATH = APP_DIR / "config.json"
+MODEL_DIR = Path(
+    os.environ.get(
+        "MACOS_LOCAL_ASR_MODEL_DIR",
+        str(APP_DIR / "models" / "parakeet-tdt-0.6b-v2-onnx-int8"),
+    )
+)
+HISTORY_PATH = APP_DIR / "history.jsonl"
+LOG_PATH = APP_DIR / "logs" / "daemon.log"
+KEY_ESC = 53
+
+
+DEFAULT_CONFIG = {
+    "hotkey": "cmd+option",
+    "sample_rate": 16000,
+    "paste_into_active_app": True,
+    "copy_to_clipboard": True,
+    "min_recording_seconds": 0.25,
+    "window_width": 270,
+    "window_height": 58,
+    "window_bottom_margin": 88,
+    "vad_enabled": True,
+    "vad_aggressiveness": 2,
+    "vad_frame_ms": 20,
+    "vad_start_padding_ms": 160,
+    "vad_end_padding_ms": 320,
+    "vad_min_speech_ms": 80,
+    "vad_audible_rms": 0.0025,
+}
+
+
+@dataclass
+class Recording:
+    frames: list[np.ndarray]
+    started_at: float
+    sample_rate: int
+
+
+@dataclass
+class VadStats:
+    enabled: bool
+    original_sec: float
+    trimmed_sec: float
+    speech_ms: float
+    start_ms: float
+    end_ms: float
+    speech_frames: int
+    total_frames: int
+    reason: str
+
+
+def log(message: str) -> None:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with LOG_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(f"[{stamp}] {message}\n")
+
+
+def load_config() -> dict[str, Any]:
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_PATH.exists():
+        CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2) + "\n", encoding="utf-8")
+        return dict(DEFAULT_CONFIG)
+    config = dict(DEFAULT_CONFIG)
+    config.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+    return config
+
+
+def normalize_key(name: str) -> str:
+    normalized = name.strip().lower()
+    aliases = {
+        "key.cmd": "cmd",
+        "key.cmd_l": "cmd",
+        "key.cmd_r": "cmd",
+        "key.alt": "option",
+        "key.alt_l": "option",
+        "key.alt_r": "option",
+        "alt": "option",
+        "option": "option",
+        "command": "cmd",
+        "cmd": "cmd",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def parse_hotkey(value: str) -> frozenset[str]:
+    return frozenset(normalize_key(part) for part in value.split("+") if part.strip())
+
+
+def hotkey_label(keys: set[str] | frozenset[str]) -> str:
+    labels = {"cmd": "Command", "option": "Option"}
+    ordered = [key for key in ("cmd", "option") if key in keys]
+    ordered.extend(sorted(keys.difference(ordered)))
+    return " + ".join(labels.get(key, key) for key in ordered)
+
+
+def write_wav(path: Path, audio: np.ndarray, sample_rate: int) -> None:
+    clipped = np.clip(audio, -1.0, 1.0)
+    pcm = (clipped * 32767).astype(np.int16)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(pcm.tobytes())
+
+
+def audio_to_pcm16(audio: np.ndarray) -> np.ndarray:
+    clipped = np.clip(audio, -1.0, 1.0)
+    return (clipped * 32767).astype("<i2")
+
+
+def trim_audio_with_vad(audio: np.ndarray, sample_rate: int, config: dict[str, Any]) -> tuple[np.ndarray | None, VadStats]:
+    original_sec = audio.size / float(sample_rate) if sample_rate else 0.0
+    if not config.get("vad_enabled", True):
+        return audio, VadStats(False, original_sec, original_sec, 0.0, 0.0, original_sec * 1000, 0, 0, "disabled")
+
+    frame_ms = int(config.get("vad_frame_ms", 20))
+    if frame_ms not in (10, 20, 30):
+        frame_ms = 20
+    frame_samples = int(sample_rate * frame_ms / 1000)
+    if frame_samples <= 0 or audio.size < frame_samples:
+        return audio, VadStats(True, original_sec, original_sec, original_sec * 1000, 0.0, original_sec * 1000, 0, 0, "too_short")
+
+    pcm = audio_to_pcm16(audio)
+    remainder = pcm.size % frame_samples
+    if remainder:
+        pcm = np.pad(pcm, (0, frame_samples - remainder), mode="constant")
+
+    vad = webrtcvad.Vad(max(0, min(3, int(config.get("vad_aggressiveness", 2)))))
+    speech_indices: list[int] = []
+    total_frames = pcm.size // frame_samples
+    for idx in range(total_frames):
+        frame = pcm[idx * frame_samples : (idx + 1) * frame_samples]
+        if vad.is_speech(frame.tobytes(), sample_rate):
+            speech_indices.append(idx)
+
+    rms = float(np.sqrt(np.mean(np.square(audio)))) if audio.size else 0.0
+    audible_rms = float(config.get("vad_audible_rms", 0.0035))
+    speech_ms = len(speech_indices) * frame_ms
+    min_speech_ms = float(config.get("vad_min_speech_ms", 80))
+
+    if rms < audible_rms:
+        return None, VadStats(True, original_sec, 0.0, speech_ms, 0.0, 0.0, len(speech_indices), total_frames, "below_rms_floor")
+
+    if not speech_indices:
+        if rms >= audible_rms:
+            return audio, VadStats(True, original_sec, original_sec, 0.0, 0.0, original_sec * 1000, 0, total_frames, "audible_fallback")
+        return None, VadStats(True, original_sec, 0.0, 0.0, 0.0, 0.0, 0, total_frames, "no_speech")
+
+    if speech_ms < min_speech_ms and rms < audible_rms:
+        return None, VadStats(True, original_sec, 0.0, speech_ms, 0.0, 0.0, len(speech_indices), total_frames, "too_little_speech")
+
+    start_padding = int(sample_rate * float(config.get("vad_start_padding_ms", 160)) / 1000)
+    end_padding = int(sample_rate * float(config.get("vad_end_padding_ms", 320)) / 1000)
+    start_sample = max(0, speech_indices[0] * frame_samples - start_padding)
+    end_sample = min(audio.size, (speech_indices[-1] + 1) * frame_samples + end_padding)
+    trimmed = audio[start_sample:end_sample]
+    trimmed_sec = trimmed.size / float(sample_rate) if sample_rate else 0.0
+    return trimmed, VadStats(
+        True,
+        original_sec,
+        trimmed_sec,
+        speech_ms,
+        start_sample * 1000.0 / sample_rate,
+        end_sample * 1000.0 / sample_rate,
+        len(speech_indices),
+        total_frames,
+        "trimmed",
+    )
+
+
+def set_clipboard(text: str) -> None:
+    subprocess.run(["pbcopy"], input=text, text=True, check=False)
+
+
+def paste_clipboard(target_bundle_id: str | None = None) -> None:
+    if target_bundle_id:
+        script = (
+            f'tell application id "{target_bundle_id}" to activate\n'
+            "delay 0.08\n"
+            'tell application "System Events" to keystroke "v" using command down'
+        )
+    else:
+        script = 'tell application "System Events" to keystroke "v" using command down'
+    subprocess.run(["osascript", "-e", script], check=False, capture_output=True)
+
+
+class WaveformView(NSView):
+    def drawRect_(self, _rect: Any) -> None:
+        widget = getattr(self, "widget", None)
+        if widget is None:
+            return
+
+        width = float(widget.width)
+        height = float(widget.height)
+        NSColor.clearColor().setFill()
+        NSBezierPath.bezierPathWithRect_(NSMakeRect(0, 0, width, height)).fill()
+
+        pill_rect = NSMakeRect(1.5, 1.5, width - 3.0, height - 3.0)
+        pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(pill_rect, 20.0, 20.0)
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(0.02, 0.02, 0.025, 0.90).setFill()
+        pill.fill()
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.12).setStroke()
+        pill.setLineWidth_(1.0)
+        pill.stroke()
+
+        bars = 30
+        bar_width = 4.4
+        gap = 3.6
+        total_width = bars * bar_width + (bars - 1) * gap
+        start_x = (width - total_width) / 2.0
+        center_y = height / 2.0
+
+        for idx in range(bars):
+            t = idx / max(1, bars - 1)
+            phase = widget.phase * 0.11 + idx * 0.34
+            if widget.mode == "recording":
+                motion = 0.42 + 0.58 * ((np.sin(phase) + 1.0) / 2.0)
+                center_weight = 0.72 + 0.28 * np.sin(np.pi * t)
+                bar_height = 5.0 + widget.smooth_level * (12.0 + 24.0 * motion * center_weight)
+            elif widget.mode == "transcribing":
+                motion = 0.25 + 0.75 * ((np.sin(phase * 1.45) + 1.0) / 2.0)
+                bar_height = 5.0 + 14.0 * motion
+            else:
+                bar_height = 5.0
+
+            red = 0.52 + 0.14 * t
+            green = 0.82 - 0.24 * t
+            blue = 1.0
+            color = NSColor.colorWithCalibratedRed_green_blue_alpha_(red, green, blue, 0.96)
+            x = start_x + idx * (bar_width + gap)
+            bar_rect = NSMakeRect(x, center_y - bar_height / 2.0, bar_width, bar_height)
+            bar = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(bar_rect, 2.2, 2.2)
+            color.setFill()
+            bar.fill()
+
+    def tick_(self, _timer: Any) -> None:
+        widget = getattr(self, "widget", None)
+        if widget is not None:
+            widget.tick()
+
+
+class FloatingWidget:
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.config = config
+        self.width = int(config["window_width"])
+        self.height = int(config["window_height"])
+        self.visible = False
+        self.mode = "ready"
+        self.target_level = 0.0
+        self.smooth_level = 0.0
+        self.phase = 0.0
+        self.pending: queue.Queue[tuple[str, str | None, float | None]] = queue.Queue()
+
+        self.app = NSApplication.sharedApplication()
+        self.app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        self.panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, self.width, self.height),
+            NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel,
+            NSBackingStoreBuffered,
+            True,
+        )
+        self.panel.setLevel_(NSScreenSaverWindowLevel)
+        self.panel.setCollectionBehavior_(
+            NSWindowCollectionBehaviorCanJoinAllSpaces
+            | NSWindowCollectionBehaviorFullScreenAuxiliary
+            | NSWindowCollectionBehaviorStationary
+        )
+        self.panel.setBackgroundColor_(NSColor.clearColor())
+        self.panel.setOpaque_(False)
+        self.panel.setHasShadow_(False)
+        self.panel.setIgnoresMouseEvents_(True)
+        self.panel.setHidesOnDeactivate_(False)
+        self.panel.setReleasedWhenClosed_(False)
+
+        self.view = WaveformView.alloc().initWithFrame_(NSMakeRect(0, 0, self.width, self.height))
+        self.view.widget = self
+        self.panel.setContentView_(self.view)
+        self.panel.orderOut_(None)
+        self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            1.0 / 30.0,
+            self.view,
+            "tick:",
+            None,
+            True,
+        )
+
+    def set_state(self, status: str, detail: str | None = None, level: float | None = None) -> None:
+        self.pending.put((status, detail, level))
+
+    def tick(self) -> None:
+        had_pending = False
+        while True:
+            try:
+                status, _detail, level = self.pending.get_nowait()
+            except queue.Empty:
+                break
+            had_pending = True
+            if level is not None:
+                self.target_level = max(0.0, min(1.0, level))
+            if status.startswith("Recording"):
+                self.mode = "recording"
+                self.show()
+            elif status.startswith("Transcribing") or status.startswith("Error"):
+                self.mode = "transcribing"
+                self.show()
+            else:
+                self.mode = "ready"
+                self.hide()
+
+        if not self.visible and not had_pending:
+            return
+
+        self.phase = (self.phase + 1.0) % 10000.0
+        target = self.target_level if self.mode == "recording" else 0.0
+        self.smooth_level = self.smooth_level * 0.82 + target * 0.18
+        if self.mode == "recording":
+            self.smooth_level = max(0.16, self.smooth_level)
+        self.view.setNeedsDisplay_(True)
+
+    def _screen_under_cursor(self) -> Any:
+        point = NSEvent.mouseLocation()
+        for screen in NSScreen.screens():
+            frame = screen.frame()
+            if (
+                frame.origin.x <= point.x <= frame.origin.x + frame.size.width
+                and frame.origin.y <= point.y <= frame.origin.y + frame.size.height
+            ):
+                return screen
+        return NSScreen.mainScreen() or NSScreen.screens()[0]
+
+    def _place_on_active_screen(self) -> None:
+        screen = self._screen_under_cursor()
+        visible = screen.visibleFrame()
+        x = visible.origin.x + (visible.size.width - self.width) / 2.0
+        bottom_margin = min(max(float(self.config["window_bottom_margin"]), 48.0), visible.size.height * 0.35)
+        y = visible.origin.y + bottom_margin
+        self.panel.setFrameOrigin_(NSMakePoint(x, y))
+
+    def show(self) -> None:
+        if not self.visible:
+            self._place_on_active_screen()
+            self.panel.setAlphaValue_(0.94)
+            self.panel.orderFrontRegardless()
+            self.visible = True
+
+    def hide(self) -> None:
+        if self.visible:
+            self.panel.orderOut_(None)
+            self.visible = False
+
+    def mainloop(self) -> None:
+        self.app.run()
+
+
+class DictationDaemon:
+    def __init__(self, widget: FloatingWidget, config: dict[str, Any]) -> None:
+        self.widget = widget
+        self.config = config
+        self.hotkey = parse_hotkey(str(config["hotkey"]))
+        self.hotkey_text = hotkey_label(self.hotkey)
+        self.trigger_active = False
+        self.event_tap = None
+        self.sample_rate = int(config["sample_rate"])
+        self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
+        self.recording: Recording | None = None
+        self.stream: sd.InputStream | None = None
+        self.lock = threading.Lock()
+        self.cancel_current = False
+        self.model = None
+        self.target_bundle_id: str | None = None
+
+    def load_model(self) -> None:
+        self.widget.set_state("Loading model...", str(MODEL_DIR))
+        started = time.perf_counter()
+        self.model = onnx_asr.load_model(
+            "nemo-parakeet-tdt-0.6b-v2",
+            path=MODEL_DIR,
+            quantization="int8",
+            providers=["CPUExecutionProvider"],
+        )
+        log(f"model loaded in {time.perf_counter() - started:.1f}s")
+        self.widget.set_state(f"Ready. Hold {self.hotkey_text}")
+
+    def start_keyboard_listener(self) -> None:
+        thread = threading.Thread(target=self._run_event_tap, daemon=True)
+        thread.start()
+
+    def _run_event_tap(self) -> None:
+        event_mask = CGEventMaskBit(kCGEventFlagsChanged) | CGEventMaskBit(kCGEventKeyDown)
+        tap = CGEventTapCreate(
+            kCGSessionEventTap,
+            kCGHeadInsertEventTap,
+            kCGEventTapOptionDefault,
+            event_mask,
+            self._event_tap_callback,
+            None,
+        )
+        if tap is None:
+            log("CGEventTap creation failed; grant Accessibility and Input Monitoring permissions")
+            self.widget.set_state("Error", "Grant Accessibility + Input Monitoring")
+            return
+
+        source = CFMachPortCreateRunLoopSource(None, tap, 0)
+        if source is None:
+            log("CGEventTap run loop source creation failed")
+            self.widget.set_state("Error", "Hotkey monitor failed")
+            return
+
+        self.event_tap = tap
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes)
+        CGEventTapEnable(tap, True)
+        log("keyboard CGEventTap started")
+        CFRunLoopRun()
+
+    def _event_tap_callback(self, _proxy: Any, event_type: int, event: Any, _refcon: Any) -> Any:
+        try:
+            if event_type in (kCGEventTapDisabledByTimeout, kCGEventTapDisabledByUserInput):
+                if self.event_tap is not None:
+                    CGEventTapEnable(self.event_tap, True)
+                return event
+
+            if event_type == kCGEventKeyDown:
+                keycode = int(CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode))
+                if keycode == KEY_ESC and self.recording is not None:
+                    self.cancel_current = True
+                    self.events.put(("stop", None))
+                    return None
+                return event
+
+            if event_type == kCGEventFlagsChanged:
+                flags = int(CGEventGetFlags(event))
+                pressed: set[str] = set()
+                if flags & int(kCGEventFlagMaskCommand):
+                    pressed.add("cmd")
+                if flags & int(kCGEventFlagMaskAlternate):
+                    pressed.add("option")
+
+                if self.hotkey.issubset(pressed) and not self.trigger_active:
+                    self.trigger_active = True
+                    self.events.put(("start", None))
+                elif self.trigger_active and not self.hotkey.issubset(pressed):
+                    self.trigger_active = False
+                    self.events.put(("stop", None))
+
+            return event
+        except Exception as exc:  # noqa: BLE001
+            log(f"CGEventTap callback failed: {exc}")
+            return event
+
+    def run_event_loop(self) -> None:
+        while True:
+            action, payload = self.events.get()
+            try:
+                if action == "start":
+                    self.start_recording()
+                elif action == "stop":
+                    self.stop_recording()
+            except Exception as exc:  # noqa: BLE001
+                log(f"{action} failed: {exc}")
+                self.widget.set_state("Error", str(exc))
+
+    def start_recording(self) -> None:
+        with self.lock:
+            if self.recording is not None:
+                return
+            self.cancel_current = False
+            target_app = NSWorkspace.sharedWorkspace().frontmostApplication()
+            self.target_bundle_id = str(target_app.bundleIdentifier()) if target_app is not None else None
+            frames: list[np.ndarray] = []
+            self.recording = Recording(frames=frames, started_at=time.perf_counter(), sample_rate=self.sample_rate)
+
+            def callback(indata: np.ndarray, _frames: int, _time_info: Any, status: sd.CallbackFlags) -> None:
+                if status:
+                    log(f"audio status: {status}")
+                mono = indata[:, 0].copy()
+                frames.append(mono)
+                rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size else 0.0
+                self.widget.set_state("Recording...", level=min(1.0, rms * 24))
+
+            self.stream = sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=1,
+                dtype="float32",
+                callback=callback,
+            )
+            self.stream.start()
+            log("recording started")
+            self.widget.set_state("Recording...", "Release hotkey to transcribe", 0.0)
+
+    def stop_recording(self) -> None:
+        with self.lock:
+            recording = self.recording
+            stream = self.stream
+            self.recording = None
+            self.stream = None
+        if recording is None:
+            return
+        if stream is not None:
+            stream.stop()
+            stream.close()
+
+        duration = time.perf_counter() - recording.started_at
+        if self.cancel_current:
+            log("recording cancelled")
+            self.widget.set_state(f"Ready. Hold {self.hotkey_text}", "Cancelled", 0.0)
+            return
+        if duration < float(self.config["min_recording_seconds"]):
+            log(f"recording too short: {duration:.2f}s")
+            self.widget.set_state(f"Ready. Hold {self.hotkey_text}", "Too short", 0.0)
+            return
+
+        audio = np.concatenate(recording.frames) if recording.frames else np.array([], dtype=np.float32)
+        if audio.size == 0:
+            log(f"recording captured no samples: {duration:.2f}s")
+            self.widget.set_state(f"Ready. Hold {self.hotkey_text}", "No microphone samples", 0.0)
+            return
+        if float(np.max(np.abs(audio))) == 0.0:
+            log(f"recording captured silent audio: {duration:.2f}s, samples={audio.size}")
+            self.widget.set_state(f"Ready. Hold {self.hotkey_text}", "No microphone signal", 0.0)
+            return
+        trimmed_audio, vad_stats = trim_audio_with_vad(audio, self.sample_rate, self.config)
+        if trimmed_audio is None or trimmed_audio.size == 0:
+            log(
+                "recording skipped by vad: "
+                f"reason={vad_stats.reason}, original={vad_stats.original_sec:.2f}s, "
+                f"speech={vad_stats.speech_ms:.0f}ms, frames={vad_stats.speech_frames}/{vad_stats.total_frames}"
+            )
+            self.widget.set_state(f"Ready. Hold {self.hotkey_text}", "No speech", 0.0)
+            return
+
+        log(
+            "recording stopped: "
+            f"{duration:.2f}s wall, samples={audio.size}, vad={vad_stats.reason}, "
+            f"audio={vad_stats.original_sec:.2f}s->{vad_stats.trimmed_sec:.2f}s, "
+            f"speech={vad_stats.speech_ms:.0f}ms"
+        )
+        threading.Thread(target=self.transcribe_and_paste, args=(trimmed_audio, duration, vad_stats), daemon=True).start()
+
+    def transcribe_and_paste(self, audio: np.ndarray, duration: float, vad_stats: VadStats) -> None:
+        if self.model is None:
+            self.load_model()
+        audio_sec = audio.size / float(self.sample_rate) if self.sample_rate else duration
+        self.widget.set_state("Transcribing...", f"{audio_sec:.1f}s audio", 0.0)
+        with tempfile.TemporaryDirectory(prefix="macos-local-asr-") as tmp:
+            wav_path = Path(tmp) / "dictation.wav"
+            write_wav(wav_path, audio, self.sample_rate)
+            started = time.perf_counter()
+            result = self.model.recognize(wav_path, sample_rate=self.sample_rate)
+            elapsed = time.perf_counter() - started
+        text = str(result).strip()
+        if text:
+            log(f"transcription complete: {audio_sec:.2f}s audio, {elapsed:.2f}s latency, words={len(text.split())}")
+            if self.config.get("copy_to_clipboard", True):
+                set_clipboard(text)
+            if self.config.get("paste_into_active_app", True):
+                paste_clipboard(self.target_bundle_id)
+            self.write_history(text, duration, audio_sec, elapsed, vad_stats)
+            self.widget.set_state(f"Ready. Hold {self.hotkey_text}", f"Pasted {len(text.split())} words in {elapsed:.2f}s", 0.0)
+        else:
+            log(f"transcription empty: {audio_sec:.2f}s audio, {elapsed:.2f}s latency")
+            self.widget.set_state(f"Ready. Hold {self.hotkey_text}", "No transcript", 0.0)
+
+    def write_history(self, text: str, duration: float, audio_sec: float, elapsed: float, vad_stats: VadStats) -> None:
+        HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with HISTORY_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "created_at": time.time(),
+                        "duration_sec": duration,
+                        "audio_sec": audio_sec,
+                        "latency_sec": elapsed,
+                        "text": text,
+                        "vad": {
+                            "enabled": vad_stats.enabled,
+                            "reason": vad_stats.reason,
+                            "original_sec": vad_stats.original_sec,
+                            "trimmed_sec": vad_stats.trimmed_sec,
+                            "speech_ms": vad_stats.speech_ms,
+                            "start_ms": vad_stats.start_ms,
+                            "end_ms": vad_stats.end_ms,
+                            "speech_frames": vad_stats.speech_frames,
+                            "total_frames": vad_stats.total_frames,
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+
+def main() -> None:
+    if not MODEL_DIR.exists():
+        raise SystemExit(f"Missing model directory: {MODEL_DIR}")
+    config = load_config()
+    widget = FloatingWidget(config)
+    daemon = DictationDaemon(widget, config)
+    threading.Thread(target=daemon.load_model, daemon=True).start()
+    daemon.start_keyboard_listener()
+    threading.Thread(target=daemon.run_event_loop, daemon=True).start()
+    log("daemon started")
+    widget.mainloop()
+    log("daemon exited")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:  # noqa: BLE001
+        log(f"fatal: {exc}")
+        raise

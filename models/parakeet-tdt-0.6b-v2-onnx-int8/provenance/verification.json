@@ -1,0 +1,49 @@
+{
+  "variants": [
+    {
+      "quant": "fp32",
+      "encoder_exists": true,
+      "decoder_exists": true,
+      "encoder_session_ok": true,
+      "decoder_session_ok": true,
+      "encoder_forward_ok": true,
+      "decoder_forward_ok": true,
+      "error": null
+    },
+    {
+      "quant": "fp16",
+      "encoder_exists": true,
+      "decoder_exists": true,
+      "encoder_session_ok": true,
+      "decoder_session_ok": true,
+      "encoder_forward_ok": true,
+      "decoder_forward_ok": true,
+      "error": null
+    },
+    {
+      "quant": "int8",
+      "encoder_exists": true,
+      "decoder_exists": true,
+      "encoder_session_ok": true,
+      "decoder_session_ok": true,
+      "encoder_forward_ok": true,
+      "decoder_forward_ok": true,
+      "error": null
+    }
+  ],
+  "preprocessor": {
+    "exists": true,
+    "path": "nemo128.onnx",
+    "session_ok": true,
+    "forward_ok": true,
+    "feature_shape": [
+      1,
+      128,
+      101
+    ],
+    "features_lens_shape": [
+      1
+    ],
+    "error": null
+  }
+}

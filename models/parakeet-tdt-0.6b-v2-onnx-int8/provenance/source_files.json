@@ -1,0 +1,50 @@
+{
+  "sha": "0bbb45a3365852604aef28b538a8f066f4ccaa85",
+  "files": [
+    {
+      "filename": "config.json",
+      "size_bytes": 97,
+      "sha256": "666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466"
+    },
+    {
+      "filename": "vocab.txt",
+      "size_bytes": 9384,
+      "sha256": "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d"
+    },
+    {
+      "filename": "encoder-model.onnx",
+      "size_bytes": 41770866,
+      "sha256": "3987bcd28175d829d12888a996a84e8f62a0e374d9ffd640662c1515adc679d3"
+    },
+    {
+      "filename": "decoder_joint-model.onnx",
+      "size_bytes": 35792059,
+      "sha256": "cbb52a07bd70ab5b67f8439d4b3cd8704b18467b4430bcacb5adabe154b8d191"
+    },
+    {
+      "filename": "encoder-model.onnx.data",
+      "size_bytes": 2435420160,
+      "sha256": "4dab7362d4874d85965045b1e41b2d61dd2cc0fb25671a7f6b3dc47bf120cc41"
+    },
+    {
+      "filename": "encoder-model.int8.onnx",
+      "size_bytes": 652184014,
+      "sha256": "3e0581fda6ab843888b51e56d7ee78b6d5bc3237ec113af1f732d1d5286aa155"
+    },
+    {
+      "filename": "decoder_joint-model.int8.onnx",
+      "size_bytes": 8998286,
+      "sha256": "a449f49acd68979d418651dd2dcb737cc0f1bf0225e009e29ee326354edbf7d3"
+    },
+    {
+      "filename": "README.md",
+      "size_bytes": 1027,
+      "sha256": "f46710815c425ebadbdbafe7c0337a09070b589f2b1d698568022b4f3f3ce12d"
+    },
+    {
+      "filename": "nemo128.onnx",
+      "size_bytes": 139764,
+      "sha256": "a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f"
+    }
+  ]
+}
