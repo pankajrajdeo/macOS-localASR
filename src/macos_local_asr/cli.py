@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -12,6 +13,7 @@ from typing import Any
 from .configuration import (
     APP_DIR,
     CONFIG_PATH,
+    CONTROL_SOCKET_PATH,
     HISTORY_PATH,
     LOG_PATH,
     MODEL_DIR,
@@ -136,6 +138,60 @@ def cmd_history(args: argparse.Namespace) -> int:
     raise AssertionError(args.history_action)
 
 
+def send_control_command(payload: dict[str, Any], timeout: float = 2.0) -> dict[str, Any]:
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(timeout)
+    try:
+        client.connect(str(CONTROL_SOCKET_PATH))
+        client.sendall((json.dumps(payload, ensure_ascii=True) + "\n").encode("utf-8"))
+        chunks: list[bytes] = []
+        while True:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if b"\n" in chunk:
+                break
+    finally:
+        client.close()
+    data = b"".join(chunks).decode("utf-8").strip()
+    return json.loads(data or "{}")
+
+
+def cmd_control(args: argparse.Namespace) -> int:
+    payload: dict[str, Any] = {"command": args.control_action}
+    if args.control_action == "start":
+        payload["locked"] = bool(args.locked)
+        if args.target_bundle_id:
+            payload["target_bundle_id"] = args.target_bundle_id
+    try:
+        response = send_control_command(payload)
+    except FileNotFoundError:
+        print(f"Control socket not found: {CONTROL_SOCKET_PATH}", file=sys.stderr)
+        print("Start the service with `macos-local-asr start` or `macos-local-asr restart`.", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"Control command failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print_json(response)
+    elif response.get("ok"):
+        if args.control_action == "status":
+            print(
+                "recording={recording} locked={locked} model_loaded={model_loaded}".format(
+                    recording=response.get("recording"),
+                    locked=response.get("locked"),
+                    model_loaded=response.get("model_loaded"),
+                )
+            )
+        else:
+            print(response.get("queued") or "ok")
+    else:
+        print(response.get("error") or response, file=sys.stderr)
+        return 1
+    return 0
+
+
 def launchctl_state() -> tuple[str, str]:
     domain = f"gui/{os.getuid()}/{LABEL}"
     result = subprocess.run(["launchctl", "print", domain], text=True, capture_output=True, check=False)
@@ -249,6 +305,20 @@ def build_parser() -> argparse.ArgumentParser:
     history_sub.add_parser("stats", help="Show local history statistics.")
     history.set_defaults(func=cmd_history)
 
+    control = subparsers.add_parser("control", help="Send a runtime control command to the worker.")
+    control_sub = control.add_subparsers(dest="control_action", required=True)
+    control_status = control_sub.add_parser("status", help="Get worker recording status.")
+    control_status.add_argument("--json", action="store_true")
+    control_start = control_sub.add_parser("start", help="Start recording through the control socket.")
+    control_start.add_argument("--locked", action="store_true", help="Start in locked recording mode.")
+    control_start.add_argument("--target-bundle-id", help="Paste target bundle id.")
+    control_start.add_argument("--json", action="store_true")
+    control_stop = control_sub.add_parser("stop", help="Stop and transcribe current recording.")
+    control_stop.add_argument("--json", action="store_true")
+    control_cancel = control_sub.add_parser("cancel", help="Cancel current recording.")
+    control_cancel.add_argument("--json", action="store_true")
+    control.set_defaults(func=cmd_control)
+
     health = subparsers.add_parser("health", help="Check installed runtime health.")
     health.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     health.set_defaults(func=cmd_health)
@@ -263,4 +333,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

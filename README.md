@@ -94,6 +94,10 @@ For longer dictation:
 ~/bin/macos-local-asr run
 ~/bin/macos-local-asr test-ui
 ~/bin/macos-local-asr health
+~/bin/macos-local-asr control status
+~/bin/macos-local-asr control start --locked
+~/bin/macos-local-asr control stop
+~/bin/macos-local-asr control cancel
 ~/bin/macos-local-asr config show
 ~/bin/macos-local-asr config get hotkey
 ~/bin/macos-local-asr config set preserve_clipboard true
@@ -122,6 +126,7 @@ Important runtime files:
 ~/Library/Application Support/macOS-localASR/models/parakeet-tdt-0.6b-v2-onnx-int8
 ~/Library/Application Support/macOS-localASR/logs
 ~/Library/Application Support/macOS-localASR/history.jsonl
+~/Library/Application Support/macOS-localASR/control.sock
 ```
 
 ## Configuration
@@ -208,6 +213,37 @@ Run the Phase 1 unit tests:
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
+
+## Menu-Bar MVP
+
+The repo includes an early native SwiftUI menu-bar shell at:
+
+```text
+apps/macos/LocalASRMenuBar
+```
+
+It controls the installed Python worker through `~/bin/macos-local-asr` and the local control socket. Install the service first with `./install.sh`, then build and run the menu-bar app:
+
+```bash
+swift build --package-path apps/macos/LocalASRMenuBar
+swift run --package-path apps/macos/LocalASRMenuBar
+```
+
+The current menu-bar MVP supports:
+
+- status polling
+- start locked recording
+- start manual recording
+- stop and paste
+- cancel recording
+- preserve clipboard toggle
+- paste into active app toggle
+- health check
+- permissions shortcut
+- worker restart
+- basic settings tabs
+
+This is not yet a signed `.app` or `.dmg`. Full app packaging, signing, notarization, model download, and updates are tracked in [`docs/GUI_PACKAGING_ROADMAP.md`](docs/GUI_PACKAGING_ROADMAP.md).
 
 ## Resource Use
 

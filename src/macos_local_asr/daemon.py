@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import queue
+import socket
 import subprocess
 import sys
 import tempfile
@@ -70,6 +71,7 @@ from Foundation import NSData
 try:
     from .configuration import (
         APP_DIR,
+        CONTROL_SOCKET_PATH,
         HISTORY_PATH,
         KEY_ESC,
         LOG_PATH,
@@ -82,6 +84,7 @@ try:
 except ImportError:  # pragma: no cover - direct script fallback for local debugging
     from configuration import (  # type: ignore
         APP_DIR,
+        CONTROL_SOCKET_PATH,
         HISTORY_PATH,
         KEY_ESC,
         LOG_PATH,
@@ -484,6 +487,7 @@ class DictationDaemon:
         self.cancel_current = False
         self.model = None
         self.target_bundle_id: str | None = None
+        self.control_socket_path = CONTROL_SOCKET_PATH
 
     def load_model(self) -> None:
         self.widget.set_state("Loading model...", str(MODEL_DIR))
@@ -500,6 +504,66 @@ class DictationDaemon:
     def start_keyboard_listener(self) -> None:
         thread = threading.Thread(target=self._run_event_tap, daemon=True)
         thread.start()
+
+    def start_control_server(self) -> None:
+        thread = threading.Thread(target=self._run_control_server, daemon=True)
+        thread.start()
+
+    def _run_control_server(self) -> None:
+        self.control_socket_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.control_socket_path.exists():
+            self.control_socket_path.unlink()
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(self.control_socket_path))
+        self.control_socket_path.chmod(0o600)
+        server.listen(4)
+        log(f"control socket listening: {self.control_socket_path}")
+        while True:
+            conn, _addr = server.accept()
+            with conn:
+                try:
+                    request = conn.recv(4096).decode("utf-8").strip()
+                    payload = json.loads(request or "{}")
+                    response = self.handle_control_command(payload)
+                except Exception as exc:  # noqa: BLE001
+                    response = {"ok": False, "error": str(exc)}
+                conn.sendall((json.dumps(response, ensure_ascii=True) + "\n").encode("utf-8"))
+
+    def handle_control_command(self, payload: dict[str, Any]) -> dict[str, Any]:
+        command = str(payload.get("command") or "")
+        if command == "status":
+            return {
+                "ok": True,
+                "recording": self.recording is not None,
+                "locked": self.recording_locked,
+                "model_loaded": self.model is not None,
+                "hotkey": self.hotkey_text,
+                "lock_hotkey": self.lock_hotkey_text,
+            }
+        if command == "start":
+            if self.recording is None:
+                self.events.put(
+                    (
+                        "start",
+                        {
+                            "locked": bool(payload.get("locked", True)),
+                            "target_bundle_id": payload.get("target_bundle_id"),
+                        },
+                    )
+                )
+            elif payload.get("locked"):
+                self.events.put(("lock", None))
+            return {"ok": True, "queued": "start"}
+        if command == "stop":
+            self.recording_locked = False
+            self.events.put(("stop", None))
+            return {"ok": True, "queued": "stop"}
+        if command == "cancel":
+            self.cancel_current = True
+            self.recording_locked = False
+            self.events.put(("stop", None))
+            return {"ok": True, "queued": "cancel"}
+        raise ValueError(f"unknown control command: {command}")
 
     def _run_event_tap(self) -> None:
         event_mask = CGEventMaskBit(kCGEventFlagsChanged) | CGEventMaskBit(kCGEventKeyDown)
@@ -594,7 +658,8 @@ class DictationDaemon:
             try:
                 if action == "start":
                     locked = bool(payload.get("locked")) if isinstance(payload, dict) else False
-                    self.start_recording(locked=locked)
+                    target_bundle_id = payload.get("target_bundle_id") if isinstance(payload, dict) else None
+                    self.start_recording(locked=locked, target_bundle_id=target_bundle_id)
                 elif action == "lock":
                     self.lock_recording()
                 elif action == "stop":
@@ -603,7 +668,7 @@ class DictationDaemon:
                 log(f"{action} failed: {exc}")
                 self.widget.set_state("Error", str(exc))
 
-    def start_recording(self, locked: bool = False) -> None:
+    def start_recording(self, locked: bool = False, target_bundle_id: str | None = None) -> None:
         with self.lock:
             if self.recording is not None:
                 if locked:
@@ -612,8 +677,11 @@ class DictationDaemon:
                 return
             self.cancel_current = False
             self.recording_locked = locked
-            target_app = NSWorkspace.sharedWorkspace().frontmostApplication()
-            self.target_bundle_id = str(target_app.bundleIdentifier()) if target_app is not None else None
+            if target_bundle_id:
+                self.target_bundle_id = target_bundle_id
+            else:
+                target_app = NSWorkspace.sharedWorkspace().frontmostApplication()
+                self.target_bundle_id = str(target_app.bundleIdentifier()) if target_app is not None else None
             frames: list[np.ndarray] = []
             self.recording = Recording(frames=frames, started_at=time.perf_counter(), sample_rate=self.sample_rate)
 
@@ -780,6 +848,7 @@ def main() -> None:
     daemon = DictationDaemon(widget, config)
     threading.Thread(target=daemon.load_model, daemon=True).start()
     daemon.start_keyboard_listener()
+    daemon.start_control_server()
     threading.Thread(target=daemon.run_event_loop, daemon=True).start()
     log("daemon started")
     widget.mainloop()

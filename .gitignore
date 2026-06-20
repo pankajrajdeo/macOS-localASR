@@ -9,6 +9,10 @@ dist/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.build/
+.swiftpm/
+DerivedData/
+*.xcuserdata/
 logs/
 history.jsonl
 *.log

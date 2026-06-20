@@ -18,6 +18,7 @@ MODEL_DIR = Path(os.environ.get("MACOS_LOCAL_ASR_MODEL_DIR", str(APP_DIR / "mode
 HISTORY_PATH = APP_DIR / "history.jsonl"
 LOG_DIR = APP_DIR / "logs"
 LOG_PATH = LOG_DIR / "daemon.log"
+CONTROL_SOCKET_PATH = APP_DIR / "control.sock"
 KEY_ESC = 53
 
 MODEL_FILES = [
@@ -230,4 +231,3 @@ def load_log_rotation_settings() -> tuple[int, int]:
     return int(config.get("log_max_bytes", DEFAULT_CONFIG["log_max_bytes"])), int(
         config.get("log_backup_count", DEFAULT_CONFIG["log_backup_count"])
     )
-

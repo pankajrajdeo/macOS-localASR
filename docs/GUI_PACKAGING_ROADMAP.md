@@ -146,17 +146,21 @@ Implemented:
 - Clipboard-preserving paste.
 - User LaunchAgent install.
 - Git LFS model bundling.
+- Local Unix socket control API.
+- SwiftUI menu-bar MVP as a Swift Package.
+- Basic settings tabs for General, Hotkeys, and Health.
 
 Missing for a proper product:
 
-- Menu-bar UI.
-- Settings window.
-- Hotkey recorder UI.
-- Permission status UI.
+- Signed `.app` bundle.
+- DMG packaging.
+- First-run installer/onboarding.
+- Polished permission status UI.
+- Real hotkey recorder UI.
 - History browser.
 - Optional local enhancement mode.
 - File transcription.
-- Signed/notarized macOS packaging.
+- Notarized macOS packaging.
 - Windows tray packaging.
 - Auto-update.
 
@@ -311,7 +315,7 @@ Models:
 ## Near-Term Repo Milestones
 
 1. Add CLI config commands for hotkeys and clipboard behavior. Done.
-2. Add menu-bar MVP for macOS.
+2. Add menu-bar MVP for macOS. Done as a Swift Package.
 3. Add history viewer.
 4. Add optional local enhancement mode through Ollama.
 5. Add file transcription without diarization.
@@ -345,16 +349,22 @@ Tasks:
 
 Goal: ship a real `.app` shell without replacing the worker yet.
 
+Status: MVP implemented as `apps/macos/LocalASRMenuBar`, a Swift Package that
+can be built and run with the Swift toolchain. Full `.app` packaging, signing,
+and notarization still require a later packaging pass with full Xcode.
+
 Tasks:
 
-- Create `apps/macos/LocalASR.xcodeproj`.
-- Build a SwiftUI `MenuBarExtra` app.
-- Add first-run permission onboarding.
-- Add a status popover with recording controls.
-- Add settings tabs for General and Hotkeys.
-- Start/stop the existing worker from the app.
-- Communicate with the worker over a local socket.
-- Keep the existing Python worker bundled for this milestone.
+- Build a SwiftUI `MenuBarExtra` app. Done.
+- Add a status popover with recording controls. Done.
+- Add settings tabs for General and Hotkeys. Done.
+- Start/stop the existing worker from the app. Done.
+- Communicate with the worker over a local socket. Done.
+- Keep the existing Python worker bundled for this milestone. Done.
+- Create a signed `.app` target with full Xcode. Pending.
+- Add first-run permission onboarding. Pending.
+- Add a proper hotkey recorder control. Pending.
+- Add release packaging and notarization. Pending.
 
 ### Milestone 3: Native Settings and History
 

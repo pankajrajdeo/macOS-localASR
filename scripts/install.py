@@ -146,18 +146,18 @@ case "${{1:-start}}" in
   test-ui)
     exec "$PYTHON" -m macos_local_asr.daemon --test-ui
     ;;
-  config|hotkey|history|health)
+  config|hotkey|history|health|control)
     exec "$PYTHON" -m macos_local_asr.cli "$@"
     ;;
   uninstall)
     launchctl bootout "$DOMAIN" "$PLIST" 2>/dev/null || true
     rm -f "$PLIST"
-    rm -rf "{APP_DIR}"
+    rm -rf "$APP_DIR"
     rm -f "$0"
     echo "Removed macOS-localASR."
     ;;
   *)
-    echo "Usage: macos-local-asr [start|stop|restart|status|logs|permissions|run|test-ui|config|hotkey|history|health|uninstall]"
+    echo "Usage: macos-local-asr [start|stop|restart|status|logs|permissions|run|test-ui|config|hotkey|history|health|control|uninstall]"
     exit 2
     ;;
 esac
