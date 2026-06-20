@@ -149,16 +149,22 @@ Implemented:
 - Local Unix socket control API.
 - SwiftUI menu-bar MVP as a Swift Package.
 - Basic settings tabs for General, Hotkeys, and Health.
+- Manual `.app` bundle builder.
+- GUI controls to start, stop, restart, and quit the service.
+- Modifier-key hotkey recorder.
+- History search and stats in the GUI.
+- Optional ASR cleanup through Ollama or OpenAI-compatible APIs.
+- Hidden cleanup guard prompt plus editable user style guide.
 
 Missing for a proper product:
 
+- Native non-Python ASR worker.
 - Signed `.app` bundle.
 - DMG packaging.
 - First-run installer/onboarding.
 - Polished permission status UI.
-- Real hotkey recorder UI.
-- History browser.
-- Optional local enhancement mode.
+- Keychain storage for API keys.
+- Optional bundled local cleanup model.
 - File transcription.
 - Notarized macOS packaging.
 - Windows tray packaging.
@@ -194,6 +200,11 @@ worker later without rewriting the UI.
 ### Phase 2: Replace Python Worker
 
 For a polished app, avoid shipping a Python virtualenv long term.
+
+This is the main remaining engineering milestone. The current ASR path relies on
+the Python `onnx-asr` Nemo/Parakeet preprocessing and TDT decoding stack. A real
+native app needs that path ported behind the same worker boundary before Python
+can be removed.
 
 Best long-term options:
 
@@ -316,13 +327,14 @@ Models:
 
 1. Add CLI config commands for hotkeys and clipboard behavior. Done.
 2. Add menu-bar MVP for macOS. Done as a Swift Package.
-3. Add history viewer.
-4. Add optional local enhancement mode through Ollama.
-5. Add file transcription without diarization.
-6. Add internal audio transcription research spike.
-7. Replace Python worker with Rust/ONNX worker.
-8. Package signed macOS release.
-9. Start Windows tray app.
+3. Add manual `.app` bundle builder. Done.
+4. Add history viewer. Done in the settings UI.
+5. Add optional cleanup mode through Ollama and OpenAI-compatible APIs. Done.
+6. Add file transcription without diarization.
+7. Add internal audio transcription research spike.
+8. Replace Python worker with native ONNX worker.
+9. Package signed macOS release.
+10. Start Windows tray app.
 
 ## Implementation Plan
 
@@ -350,8 +362,9 @@ Tasks:
 Goal: ship a real `.app` shell without replacing the worker yet.
 
 Status: MVP implemented as `apps/macos/LocalASRMenuBar`, a Swift Package that
-can be built and run with the Swift toolchain. Full `.app` packaging, signing,
-and notarization still require a later packaging pass with full Xcode.
+can be built and run with the Swift toolchain. A manual `.app` builder is
+available at `scripts/build_macos_app.py`. Signing, notarization, DMG packaging,
+and native worker replacement remain pending.
 
 Tasks:
 
@@ -361,9 +374,11 @@ Tasks:
 - Start/stop the existing worker from the app. Done.
 - Communicate with the worker over a local socket. Done.
 - Keep the existing Python worker bundled for this milestone. Done.
+- Add manual `.app` bundle builder. Done.
+- Add history search/stats UI. Done.
+- Add modifier-key hotkey recorder. Done.
 - Create a signed `.app` target with full Xcode. Pending.
 - Add first-run permission onboarding. Pending.
-- Add a proper hotkey recorder control. Pending.
 - Add release packaging and notarization. Pending.
 
 ### Milestone 3: Native Settings and History
@@ -372,24 +387,34 @@ Goal: make it usable by non-technical users.
 
 Tasks:
 
-- Hotkey recorder UI.
-- History window with search/copy/delete.
-- Permissions diagnostic panel.
-- Model status/download panel.
-- Basic usage statistics from local history.
+- Hotkey recorder UI. Done for modifier-key combinations.
+- History window with search/copy/delete. Search and stats are done; copy/delete are pending.
+- Permissions diagnostic panel. Basic health output is done; polished permission rows are pending.
+- Model status/download panel. Pending.
+- Basic usage statistics from local history. Done.
 - Export/import settings.
 
 ### Milestone 4: Optional Enhancement Mode
 
 Goal: improve text only when the user explicitly asks for it.
 
+Status: implemented as optional post-ASR cleanup. Raw ASR remains the default.
+The app supports local Ollama and OpenAI-compatible API bases. The visible prompt
+is a user-editable style guide; a hidden app-owned prefix/suffix defines the
+non-chat transcript cleanup task and tells the model to treat transcript content
+as untrusted data.
+
 Tasks:
 
-- Add enhancement toggle.
-- Add prompt templates.
-- Add Ollama adapter.
-- Support `lfm2.5-350m` as the default lightweight cleanup model.
-- Support `lfm2.5-1.2b-instruct` for heavier custom prompts.
+- Add enhancement toggle. Done.
+- Add prompt templates. Done.
+- Add Ollama adapter. Done.
+- Add OpenAI-compatible API adapter. Done.
+- Add local model listing for Ollama. Done.
+- Add hidden prompt boundary around editable prompt. Done.
+- Support `lfm2.5-1.2b-instruct` as the recommended local cleanup model. Done.
+- Re-evaluate `lfm2.5-350m` only if prompt tuning or tests make it reliable enough. Pending.
+- Store API keys in Keychain. Pending.
 - Add idle unload behavior for the enhancement model.
 - Evaluate latency, RAM, and text quality before enabling by default.
 

@@ -98,6 +98,8 @@ For longer dictation:
 ~/bin/macos-local-asr control start --locked
 ~/bin/macos-local-asr control stop
 ~/bin/macos-local-asr control cancel
+~/bin/macos-local-asr cleanup models
+~/bin/macos-local-asr cleanup test "this is a sample dictation"
 ~/bin/macos-local-asr config show
 ~/bin/macos-local-asr config get hotkey
 ~/bin/macos-local-asr config set preserve_clipboard true
@@ -107,6 +109,12 @@ For longer dictation:
 ~/bin/macos-local-asr history stats
 ~/bin/macos-local-asr uninstall
 ```
+
+From the menu-bar app:
+
+- `Stop Service` turns off the background ASR worker.
+- `Quit App` closes only the menu-bar UI.
+- `Stop & Quit` turns off the worker and closes the menu-bar UI.
 
 ## Installed Locations
 
@@ -166,7 +174,13 @@ Default config:
   "vad_min_speech_ms": 80,
   "vad_audible_rms": 0.0025,
   "log_max_bytes": 1048576,
-  "log_backup_count": 5
+  "log_backup_count": 5,
+  "cleanup_enabled": false,
+  "cleanup_provider": "ollama",
+  "cleanup_model": "",
+  "cleanup_api_base": "http://127.0.0.1:11434",
+  "cleanup_api_key": "",
+  "cleanup_prompt": "Light cleanup style:\n- Fix punctuation, capitalization, spacing, and obvious ASR slips.\n- Preserve the speaker's wording and meaning.\n- Keep the original language.\n- Do not summarize or rewrite heavily."
 }
 ```
 
@@ -182,8 +196,39 @@ Common config examples:
 ~/bin/macos-local-asr config set copy_to_clipboard false
 ~/bin/macos-local-asr hotkey set push cmd+option
 ~/bin/macos-local-asr hotkey set lock ctrl+cmd+option
+~/bin/macos-local-asr config set cleanup_enabled true
+~/bin/macos-local-asr config set cleanup_provider ollama
+~/bin/macos-local-asr cleanup models
 ~/bin/macos-local-asr restart
 ```
+
+## Optional ASR Cleanup
+
+Raw local ASR is the default. Cleanup is optional and runs only when `cleanup_enabled` is true.
+
+Recommended setup:
+
+```bash
+ollama pull liquidai/lfm2.5-1.2b-instruct:q4_k_m
+~/bin/macos-local-asr config set cleanup_provider ollama
+~/bin/macos-local-asr config set cleanup_model liquidai/lfm2.5-1.2b-instruct:q4_k_m
+~/bin/macos-local-asr config set cleanup_enabled true
+~/bin/macos-local-asr restart
+```
+
+The app also supports an OpenAI-compatible endpoint:
+
+```bash
+~/bin/macos-local-asr config set cleanup_provider openai_compatible
+~/bin/macos-local-asr config set cleanup_api_base https://api.openai.com/v1
+~/bin/macos-local-asr config set cleanup_model gpt-4o-mini
+~/bin/macos-local-asr config set cleanup_api_key YOUR_KEY
+~/bin/macos-local-asr config set cleanup_enabled true
+```
+
+For privacy, local Ollama is the preferred default. API keys are currently stored in the local config file, so use a local server or a scoped key until Keychain storage is added.
+
+The visible cleanup prompt is only a style guide. The app adds a hidden safety prefix/suffix that tells the model to treat ASR text as transcript data, not as a question or instruction to answer.
 
 ## Smoke Test
 
@@ -229,6 +274,13 @@ swift build --package-path apps/macos/LocalASRMenuBar
 swift run --package-path apps/macos/LocalASRMenuBar
 ```
 
+To build a normal macOS `.app` bundle:
+
+```bash
+python3 scripts/build_macos_app.py
+open dist/LocalASR.app
+```
+
 The current menu-bar MVP supports:
 
 - status polling
@@ -236,14 +288,18 @@ The current menu-bar MVP supports:
 - start manual recording
 - stop and paste
 - cancel recording
+- start, stop, restart, and quit service controls
 - preserve clipboard toggle
 - paste into active app toggle
+- optional ASR cleanup through Ollama or OpenAI-compatible APIs
+- modifier-key hotkey recorder
+- history search and stats
 - health check
 - permissions shortcut
 - worker restart
 - basic settings tabs
 
-This is not yet a signed `.app` or `.dmg`. Full app packaging, signing, notarization, model download, and updates are tracked in [`docs/GUI_PACKAGING_ROADMAP.md`](docs/GUI_PACKAGING_ROADMAP.md).
+This is not yet a signed/notarized `.app` or `.dmg`. Full signing, notarization, model download, native worker replacement, and updates are tracked in [`docs/GUI_PACKAGING_ROADMAP.md`](docs/GUI_PACKAGING_ROADMAP.md).
 
 ## Resource Use
 

@@ -97,6 +97,32 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 50
+    },
+    "cleanup_enabled": {
+      "type": "boolean"
+    },
+    "cleanup_provider": {
+      "type": "string",
+      "enum": [
+        "ollama",
+        "openai_compatible"
+      ]
+    },
+    "cleanup_model": {
+      "type": "string",
+      "minLength": 0
+    },
+    "cleanup_api_base": {
+      "type": "string",
+      "minLength": 0
+    },
+    "cleanup_api_key": {
+      "type": "string",
+      "minLength": 0
+    },
+    "cleanup_prompt": {
+      "type": "string",
+      "minLength": 1
     }
   }
 }

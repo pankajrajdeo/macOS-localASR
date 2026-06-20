@@ -32,6 +32,12 @@ MODEL_FILES = [
     "ATTRIBUTION.md",
 ]
 
+DEFAULT_CLEANUP_PROMPT = """Light cleanup style:
+- Fix punctuation, capitalization, spacing, and obvious ASR slips.
+- Preserve the speaker's wording and meaning.
+- Keep the original language.
+- Do not summarize or rewrite heavily."""
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "hotkey": "cmd+option",
     "lock_hotkey": "ctrl+cmd+option",
@@ -53,6 +59,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "vad_audible_rms": 0.0025,
     "log_max_bytes": 1_048_576,
     "log_backup_count": 5,
+    "cleanup_enabled": False,
+    "cleanup_provider": "ollama",
+    "cleanup_model": "",
+    "cleanup_api_base": "http://127.0.0.1:11434",
+    "cleanup_api_key": "",
+    "cleanup_prompt": DEFAULT_CLEANUP_PROMPT,
 }
 
 CONFIG_SCHEMA: dict[str, Any] = {
@@ -81,6 +93,12 @@ CONFIG_SCHEMA: dict[str, Any] = {
         "vad_audible_rms": {"type": "number", "minimum": 0, "maximum": 1},
         "log_max_bytes": {"type": "integer", "minimum": 65536, "maximum": 104857600},
         "log_backup_count": {"type": "integer", "minimum": 0, "maximum": 50},
+        "cleanup_enabled": {"type": "boolean"},
+        "cleanup_provider": {"type": "string", "enum": ["ollama", "openai_compatible"]},
+        "cleanup_model": {"type": "string", "minLength": 0},
+        "cleanup_api_base": {"type": "string", "minLength": 0},
+        "cleanup_api_key": {"type": "string", "minLength": 0},
+        "cleanup_prompt": {"type": "string", "minLength": 1},
     },
 }
 
@@ -205,11 +223,23 @@ def validate_config(config: dict[str, Any]) -> list[str]:
             if "maximum" in schema and value > schema["maximum"]:
                 errors.append(f"{key} must be <= {schema['maximum']}")
         elif expected_type == "string":
-            if not isinstance(value, str) or not value.strip():
+            if not isinstance(value, str):
+                errors.append(f"{key} must be string")
+                continue
+            if "enum" in schema and value not in schema["enum"]:
+                errors.append(f"{key} must be one of {schema['enum']}")
+            if schema.get("minLength", 0) > 0 and not value.strip():
                 errors.append(f"{key} must be non-empty string")
 
     errors.extend(validate_hotkey(str(merged["hotkey"]), "hotkey"))
     errors.extend(validate_hotkey(str(merged["lock_hotkey"]), "lock_hotkey"))
+    if merged.get("cleanup_enabled"):
+        if not str(merged.get("cleanup_model", "")).strip():
+            errors.append("cleanup_model must be set when cleanup_enabled is true")
+        if not str(merged.get("cleanup_prompt", "")).strip():
+            errors.append("cleanup_prompt must be set when cleanup_enabled is true")
+        if str(merged.get("cleanup_provider")) == "openai_compatible" and not str(merged.get("cleanup_api_base", "")).strip():
+            errors.append("cleanup_api_base must be set for openai_compatible cleanup")
     return errors
 
 

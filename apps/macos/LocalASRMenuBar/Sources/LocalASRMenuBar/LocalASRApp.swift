@@ -23,7 +23,7 @@ struct LocalASRMenuBarApp: App {
         Settings {
             SettingsView()
                 .environmentObject(controller)
-                .frame(width: 520, height: 360)
+                .frame(width: 640, height: 560)
         }
     }
 }
@@ -45,12 +45,22 @@ final class ASRController: ObservableObject {
     @Published var isRecording = false
     @Published var isLocked = false
     @Published var modelLoaded = false
+    @Published var serviceReachable = false
     @Published var preserveClipboard = true
     @Published var pasteIntoActiveApp = true
+    @Published var cleanupEnabled = false
+    @Published var cleanupProvider = "ollama"
+    @Published var cleanupModel = ""
+    @Published var cleanupAPIBase = "http://127.0.0.1:11434"
+    @Published var cleanupAPIKey = ""
+    @Published var cleanupPrompt = ""
+    @Published var cleanupModels: [String] = []
+    @Published var cleanupStatus = "Enhance mode is off."
     @Published var pushHotkey = "cmd+option"
     @Published var lockHotkey = "ctrl+cmd+option"
     @Published var statusText = "Checking service"
     @Published var healthText = "Not checked"
+    @Published var historyText = "Search or load stats to view local dictation history."
     @Published var lastCommandOutput = ""
 
     private var pollTimer: Timer?
@@ -61,6 +71,9 @@ final class ASRController: ObservableObject {
     }
 
     var menuBarSymbol: String {
+        if !serviceReachable {
+            return "mic.slash.circle"
+        }
         if isRecording {
             return isLocked ? "waveform.circle.fill" : "waveform.circle"
         }
@@ -91,6 +104,12 @@ final class ASRController: ObservableObject {
             if let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 self.preserveClipboard = config["preserve_clipboard"] as? Bool ?? true
                 self.pasteIntoActiveApp = config["paste_into_active_app"] as? Bool ?? true
+                self.cleanupEnabled = config["cleanup_enabled"] as? Bool ?? false
+                self.cleanupProvider = config["cleanup_provider"] as? String ?? "ollama"
+                self.cleanupModel = config["cleanup_model"] as? String ?? ""
+                self.cleanupAPIBase = config["cleanup_api_base"] as? String ?? "http://127.0.0.1:11434"
+                self.cleanupAPIKey = config["cleanup_api_key"] as? String ?? ""
+                self.cleanupPrompt = config["cleanup_prompt"] as? String ?? ""
                 self.pushHotkey = config["hotkey"] as? String ?? "cmd+option"
                 self.lockHotkey = config["lock_hotkey"] as? String ?? "ctrl+cmd+option"
             }
@@ -102,7 +121,9 @@ final class ASRController: ObservableObject {
             guard let self else { return }
             if result.status != 0 {
                 self.isRecording = false
+                self.isLocked = false
                 self.modelLoaded = false
+                self.serviceReachable = false
                 self.statusText = "Service not reachable"
                 self.lastCommandOutput = result.stderr.isEmpty ? result.stdout : result.stderr
                 return
@@ -112,6 +133,7 @@ final class ASRController: ObservableObject {
                 self.statusText = "Invalid service response"
                 return
             }
+            self.serviceReachable = true
             self.isRecording = payload["recording"] as? Bool ?? false
             self.isLocked = payload["locked"] as? Bool ?? false
             self.modelLoaded = payload["model_loaded"] as? Bool ?? false
@@ -167,9 +189,81 @@ final class ASRController: ObservableObject {
         }
     }
 
+    func stopWorker() {
+        run(["stop"]) { [weak self] result in
+            guard let self else { return }
+            self.lastCommandOutput = result.stdout.isEmpty ? result.stderr : result.stdout
+            self.isRecording = false
+            self.isLocked = false
+            self.modelLoaded = false
+            self.serviceReachable = false
+            self.statusText = "Service stopped"
+        }
+    }
+
+    func quitAndStopWorker() {
+        run(["stop"]) { _ in
+            NSApp.terminate(nil)
+        }
+    }
+
     func runHealthCheck() {
         run(["health"]) { [weak self] result in
             self?.healthText = result.stdout.isEmpty ? result.stderr : result.stdout
+        }
+    }
+
+    func searchHistory(query: String) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let args = trimmed.isEmpty ? ["history", "stats"] : ["history", "search", trimmed, "--limit", "25"]
+        run(args) { [weak self] result in
+            self?.historyText = result.stdout.isEmpty ? result.stderr : result.stdout
+        }
+    }
+
+    func loadHistoryStats() {
+        run(["history", "stats"]) { [weak self] result in
+            self?.historyText = result.stdout.isEmpty ? result.stderr : result.stdout
+        }
+    }
+
+    func loadCleanupModels() {
+        cleanupStatus = "Checking models..."
+        run(["cleanup", "models", "--json"]) { [weak self] result in
+            guard let self else { return }
+            guard let data = result.stdout.data(using: .utf8),
+                  let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                self.cleanupModels = []
+                self.cleanupStatus = result.stderr.isEmpty ? "Model listing failed." : result.stderr
+                return
+            }
+            let models = payload["models"] as? [String] ?? []
+            self.cleanupModels = models
+            if payload["ok"] as? Bool == true {
+                self.cleanupStatus = models.isEmpty ? "No models found." : "\(models.count) model(s) available."
+                if self.cleanupModel.isEmpty, let first = models.first {
+                    self.cleanupModel = first
+                    self.setConfig("cleanup_model", value: first)
+                }
+            } else {
+                self.cleanupStatus = payload["error"] as? String ?? "Model listing failed."
+            }
+        }
+    }
+
+    func testCleanup(sample: String) {
+        cleanupStatus = "Testing cleanup..."
+        run(["cleanup", "test", sample]) { [weak self] result in
+            self?.cleanupStatus = result.stdout.isEmpty ? result.stderr : result.stdout
+        }
+    }
+
+    func openOllama() {
+        DispatchQueue.global(qos: .utility).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            process.arguments = ["-a", "Ollama"]
+            try? process.run()
         }
     }
 
@@ -239,7 +333,13 @@ struct MenuContentView: View {
             Divider()
 
             VStack(spacing: 8) {
-                if controller.isRecording {
+                if !controller.serviceReachable {
+                    Button {
+                        controller.startWorker()
+                    } label: {
+                        Label("Start Service", systemImage: "play.circle")
+                    }
+                } else if controller.isRecording {
                     Button {
                         controller.stopRecording()
                     } label: {
@@ -297,12 +397,22 @@ struct MenuContentView: View {
             Divider()
 
             HStack {
-                Button("Restart Worker") {
+                Button("Restart") {
                     controller.restartWorker()
                 }
                 Spacer()
-                Button("Quit") {
+                Button("Stop Service") {
+                    controller.stopWorker()
+                }
+            }
+
+            HStack {
+                Button("Quit App") {
                     controller.quit()
+                }
+                Spacer()
+                Button("Stop & Quit") {
+                    controller.quitAndStopWorker()
                 }
             }
         }
@@ -346,9 +456,17 @@ struct SettingsView: View {
                 .tabItem {
                     Label("Hotkeys", systemImage: "keyboard")
                 }
+            EnhanceSettingsView()
+                .tabItem {
+                    Label("Enhance", systemImage: "sparkles")
+                }
             HealthSettingsView()
                 .tabItem {
                     Label("Health", systemImage: "checkmark.seal")
+                }
+            HistorySettingsView()
+                .tabItem {
+                    Label("History", systemImage: "clock.arrow.circlepath")
                 }
         }
         .padding()
@@ -371,8 +489,16 @@ struct GeneralSettingsView: View {
                 get: { controller.pasteIntoActiveApp },
                 set: { controller.setConfig("paste_into_active_app", value: $0 ? "true" : "false") }
             ))
-            Button("Restart Worker") {
-                controller.restartWorker()
+            HStack {
+                Button("Start Service") {
+                    controller.startWorker()
+                }
+                Button("Stop Service") {
+                    controller.stopWorker()
+                }
+                Button("Restart Service") {
+                    controller.restartWorker()
+                }
             }
         }
         .formStyle(.grouped)
@@ -386,17 +512,33 @@ struct HotkeySettingsView: View {
 
     var body: some View {
         Form {
-            TextField("Push-to-talk hotkey", text: $pushHotkey)
-            Button("Save Push-to-Talk Hotkey") {
-                controller.setConfig("hotkey", value: pushHotkey)
+            VStack(alignment: .leading, spacing: 8) {
+                TextField("Push-to-talk hotkey", text: $pushHotkey)
+                HStack {
+                    Button("Save Push-to-Talk Hotkey") {
+                        controller.setConfig("hotkey", value: pushHotkey)
+                    }
+                    HotkeyRecorderButton(title: "Record Push Hotkey") { value in
+                        pushHotkey = value
+                        controller.setConfig("hotkey", value: value)
+                    }
+                }
             }
 
-            TextField("Locked recording hotkey", text: $lockHotkey)
-            Button("Save Locked Recording Hotkey") {
-                controller.setConfig("lock_hotkey", value: lockHotkey)
+            VStack(alignment: .leading, spacing: 8) {
+                TextField("Locked recording hotkey", text: $lockHotkey)
+                HStack {
+                    Button("Save Locked Recording Hotkey") {
+                        controller.setConfig("lock_hotkey", value: lockHotkey)
+                    }
+                    HotkeyRecorderButton(title: "Record Lock Hotkey") { value in
+                        lockHotkey = value
+                        controller.setConfig("lock_hotkey", value: value)
+                    }
+                }
             }
 
-            Text("Use modifier-only values like cmd+option or ctrl+cmd+option. Restart after changing hotkeys.")
+            Text("Use Command, Option, and Control combinations. Restart the service after changing hotkeys.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -405,6 +547,174 @@ struct HotkeySettingsView: View {
             pushHotkey = controller.pushHotkey
             lockHotkey = controller.lockHotkey
         }
+    }
+}
+
+struct HotkeyRecorderButton: View {
+    let title: String
+    let onRecord: (String) -> Void
+    @State private var isRecording = false
+    @State private var monitor: Any?
+
+    var body: some View {
+        Button(isRecording ? "Press modifiers..." : title) {
+            isRecording ? stopRecording() : startRecording()
+        }
+        .onDisappear {
+            stopRecording()
+        }
+    }
+
+    private func startRecording() {
+        stopRecording()
+        isRecording = true
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
+            let value = hotkeyString(from: event.modifierFlags)
+            if !value.isEmpty {
+                onRecord(value)
+                stopRecording()
+            }
+            return event
+        }
+    }
+
+    private func stopRecording() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+        isRecording = false
+    }
+
+    private func hotkeyString(from flags: NSEvent.ModifierFlags) -> String {
+        var keys: [String] = []
+        if flags.contains(.control) {
+            keys.append("ctrl")
+        }
+        if flags.contains(.command) {
+            keys.append("cmd")
+        }
+        if flags.contains(.option) {
+            keys.append("option")
+        }
+        return keys.joined(separator: "+")
+    }
+}
+
+struct EnhanceSettingsView: View {
+    @EnvironmentObject private var controller: ASRController
+    @State private var sampleText = "this is a sample dictation with missing punctuation"
+    @State private var draftAPIBase = ""
+    @State private var draftAPIKey = ""
+    @State private var draftModel = ""
+    @State private var draftPrompt = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle("Enable ASR cleanup", isOn: Binding(
+                get: { controller.cleanupEnabled },
+                set: { controller.setConfig("cleanup_enabled", value: $0 ? "true" : "false") }
+            ))
+
+            Picker("Provider", selection: Binding(
+                get: { controller.cleanupProvider },
+                set: { value in
+                    controller.setConfig("cleanup_provider", value: value)
+                    if value == "ollama", controller.cleanupAPIBase.isEmpty {
+                        controller.setConfig("cleanup_api_base", value: "http://127.0.0.1:11434")
+                    }
+                }
+            )) {
+                Text("Ollama local").tag("ollama")
+                Text("OpenAI-compatible API").tag("openai_compatible")
+            }
+            .pickerStyle(.segmented)
+
+            HStack {
+                TextField("API base", text: $draftAPIBase)
+                if controller.cleanupProvider == "ollama" {
+                    Button("Open Ollama") {
+                        controller.openOllama()
+                    }
+                    Button("Refresh Models") {
+                        controller.loadCleanupModels()
+                    }
+                }
+                Button("Save") {
+                    controller.setConfig("cleanup_api_base", value: draftAPIBase)
+                }
+            }
+
+            if controller.cleanupProvider == "openai_compatible" {
+                HStack {
+                    SecureField("API key", text: $draftAPIKey)
+                    Button("Save Key") {
+                        controller.setConfig("cleanup_api_key", value: draftAPIKey)
+                    }
+                }
+                Text("API keys are currently stored in the local config file. Use a local server or throwaway key until Keychain storage is added.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if controller.cleanupProvider == "ollama", !controller.cleanupModels.isEmpty {
+                Picker("Model", selection: Binding(
+                    get: { controller.cleanupModel },
+                    set: { value in
+                        draftModel = value
+                        controller.setConfig("cleanup_model", value: value)
+                    }
+                )) {
+                    ForEach(controller.cleanupModels, id: \.self) { model in
+                        Text(model).tag(model)
+                    }
+                }
+            } else {
+                HStack {
+                    TextField("Model", text: $draftModel)
+                    Button("Save Model") {
+                        controller.setConfig("cleanup_model", value: draftModel)
+                    }
+                }
+            }
+
+            HStack {
+                Text("Cleanup prompt")
+                    .font(.headline)
+                Spacer()
+                Button("Save Prompt") {
+                    controller.setConfig("cleanup_prompt", value: draftPrompt)
+                }
+            }
+            TextEditor(text: $draftPrompt)
+            .font(.system(.caption, design: .monospaced))
+            .frame(minHeight: 110)
+
+            HStack {
+                TextField("Sample text", text: $sampleText)
+                Button("Test") {
+                    controller.testCleanup(sample: sampleText)
+                }
+            }
+
+            Text(controller.cleanupStatus)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+        .onAppear {
+            syncDrafts()
+            if controller.cleanupProvider == "ollama" {
+                controller.loadCleanupModels()
+            }
+        }
+    }
+
+    private func syncDrafts() {
+        draftAPIBase = controller.cleanupAPIBase
+        draftAPIKey = controller.cleanupAPIKey
+        draftModel = controller.cleanupModel
+        draftPrompt = controller.cleanupPrompt
     }
 }
 
@@ -422,6 +732,34 @@ struct HealthSettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
             }
+        }
+    }
+}
+
+struct HistorySettingsView: View {
+    @EnvironmentObject private var controller: ASRController
+    @State private var query = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                TextField("Search history", text: $query)
+                Button("Search") {
+                    controller.searchHistory(query: query)
+                }
+                Button("Stats") {
+                    controller.loadHistoryStats()
+                }
+            }
+            ScrollView {
+                Text(controller.historyText)
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .onAppear {
+            controller.loadHistoryStats()
         }
     }
 }

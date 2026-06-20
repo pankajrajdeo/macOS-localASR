@@ -26,6 +26,7 @@ from .configuration import (
     set_config_value,
     validate_config,
 )
+from .cleanup import CleanupError, cleanup_text, list_cleanup_models
 
 
 LABEL = os.environ.get("MACOS_LOCAL_ASR_LABEL", "com.pankajrajdeo.macos-local-asr")
@@ -192,6 +193,48 @@ def cmd_control(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cleanup(args: argparse.Namespace) -> int:
+    config = load_config()
+    if args.cleanup_action == "models":
+        try:
+            models = list_cleanup_models(config)
+            payload = {
+                "ok": True,
+                "provider": config.get("cleanup_provider"),
+                "api_base": config.get("cleanup_api_base"),
+                "models": models,
+            }
+        except CleanupError as exc:
+            payload = {
+                "ok": False,
+                "provider": config.get("cleanup_provider"),
+                "api_base": config.get("cleanup_api_base"),
+                "models": [],
+                "error": str(exc),
+            }
+            if args.json:
+                print_json(payload)
+            else:
+                print(f"Cleanup model listing failed: {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print_json(payload)
+        else:
+            for model in models:
+                print(model)
+        return 0
+    if args.cleanup_action == "test":
+        test_config = dict(config)
+        test_config["cleanup_enabled"] = True
+        try:
+            print(cleanup_text(args.text, test_config))
+            return 0
+        except CleanupError as exc:
+            print(f"Cleanup failed: {exc}", file=sys.stderr)
+            return 1
+    raise AssertionError(args.cleanup_action)
+
+
 def launchctl_state() -> tuple[str, str]:
     domain = f"gui/{os.getuid()}/{LABEL}"
     result = subprocess.run(["launchctl", "print", domain], text=True, capture_output=True, check=False)
@@ -318,6 +361,14 @@ def build_parser() -> argparse.ArgumentParser:
     control_cancel = control_sub.add_parser("cancel", help="Cancel current recording.")
     control_cancel.add_argument("--json", action="store_true")
     control.set_defaults(func=cmd_control)
+
+    cleanup = subparsers.add_parser("cleanup", help="Inspect and test optional post-ASR cleanup.")
+    cleanup_sub = cleanup.add_subparsers(dest="cleanup_action", required=True)
+    cleanup_models = cleanup_sub.add_parser("models", help="List cleanup models from the configured provider.")
+    cleanup_models.add_argument("--json", action="store_true")
+    cleanup_test = cleanup_sub.add_parser("test", help="Run configured cleanup on sample text.")
+    cleanup_test.add_argument("text")
+    cleanup.set_defaults(func=cmd_cleanup)
 
     health = subparsers.add_parser("health", help="Check installed runtime health.")
     health.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")

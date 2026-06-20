@@ -69,6 +69,7 @@ from Quartz import (
 from Foundation import NSData
 
 try:
+    from .cleanup import CleanupError, cleanup_text
     from .configuration import (
         APP_DIR,
         CONTROL_SOCKET_PATH,
@@ -82,6 +83,7 @@ try:
         parse_hotkey,
     )
 except ImportError:  # pragma: no cover - direct script fallback for local debugging
+    from cleanup import CleanupError, cleanup_text  # type: ignore
     from configuration import (  # type: ignore
         APP_DIR,
         CONTROL_SOCKET_PATH,
@@ -777,46 +779,79 @@ class DictationDaemon:
             started = time.perf_counter()
             result = self.model.recognize(wav_path, sample_rate=self.sample_rate)
             elapsed = time.perf_counter() - started
-        text = str(result).strip()
+        raw_text = str(result).strip()
+        runtime_config = load_config()
+        self.config = runtime_config
+        text = raw_text
+        cleanup_elapsed = 0.0
+        if raw_text and runtime_config.get("cleanup_enabled", False):
+            self.widget.set_state("Cleaning transcript...", str(runtime_config.get("cleanup_model", "")), 0.0)
+            cleanup_started = time.perf_counter()
+            try:
+                text = cleanup_text(raw_text, runtime_config)
+                cleanup_elapsed = time.perf_counter() - cleanup_started
+                log(
+                    "cleanup complete: "
+                    f"provider={runtime_config.get('cleanup_provider')}, "
+                    f"model={runtime_config.get('cleanup_model')}, latency={cleanup_elapsed:.2f}s"
+                )
+            except CleanupError as exc:
+                cleanup_elapsed = time.perf_counter() - cleanup_started
+                text = raw_text
+                log(f"cleanup failed, using raw transcript: {exc}")
         if text:
-            log(f"transcription complete: {audio_sec:.2f}s audio, {elapsed:.2f}s latency, words={len(text.split())}")
-            if self.config.get("paste_into_active_app", True):
-                paste_text(text, self.target_bundle_id, self.config)
-            elif self.config.get("copy_to_clipboard", False):
+            log(
+                "transcription complete: "
+                f"{audio_sec:.2f}s audio, {elapsed:.2f}s asr latency, "
+                f"{cleanup_elapsed:.2f}s cleanup latency, words={len(text.split())}"
+            )
+            if runtime_config.get("paste_into_active_app", True):
+                paste_text(text, self.target_bundle_id, runtime_config)
+            elif runtime_config.get("copy_to_clipboard", False):
                 set_clipboard(text)
-            self.write_history(text, duration, audio_sec, elapsed, vad_stats)
-            self.widget.set_state(f"Ready. Hold {self.hotkey_text}", f"Pasted {len(text.split())} words in {elapsed:.2f}s", 0.0)
+            self.write_history(text, duration, audio_sec, elapsed + cleanup_elapsed, vad_stats, raw_text=raw_text)
+            self.widget.set_state(
+                f"Ready. Hold {self.hotkey_text}",
+                f"Pasted {len(text.split())} words in {elapsed + cleanup_elapsed:.2f}s",
+                0.0,
+            )
         else:
             log(f"transcription empty: {audio_sec:.2f}s audio, {elapsed:.2f}s latency")
             self.widget.set_state(f"Ready. Hold {self.hotkey_text}", "No transcript", 0.0)
 
-    def write_history(self, text: str, duration: float, audio_sec: float, elapsed: float, vad_stats: VadStats) -> None:
+    def write_history(
+        self,
+        text: str,
+        duration: float,
+        audio_sec: float,
+        elapsed: float,
+        vad_stats: VadStats,
+        *,
+        raw_text: str | None = None,
+    ) -> None:
         HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, Any] = {
+            "created_at": time.time(),
+            "duration_sec": duration,
+            "audio_sec": audio_sec,
+            "latency_sec": elapsed,
+            "text": text,
+            "vad": {
+                "enabled": vad_stats.enabled,
+                "reason": vad_stats.reason,
+                "original_sec": vad_stats.original_sec,
+                "trimmed_sec": vad_stats.trimmed_sec,
+                "speech_ms": vad_stats.speech_ms,
+                "start_ms": vad_stats.start_ms,
+                "end_ms": vad_stats.end_ms,
+                "speech_frames": vad_stats.speech_frames,
+                "total_frames": vad_stats.total_frames,
+            },
+        }
+        if raw_text is not None and raw_text != text:
+            payload["raw_text"] = raw_text
         with HISTORY_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(
-                json.dumps(
-                    {
-                        "created_at": time.time(),
-                        "duration_sec": duration,
-                        "audio_sec": audio_sec,
-                        "latency_sec": elapsed,
-                        "text": text,
-                        "vad": {
-                            "enabled": vad_stats.enabled,
-                            "reason": vad_stats.reason,
-                            "original_sec": vad_stats.original_sec,
-                            "trimmed_sec": vad_stats.trimmed_sec,
-                            "speech_ms": vad_stats.speech_ms,
-                            "start_ms": vad_stats.start_ms,
-                            "end_ms": vad_stats.end_ms,
-                            "speech_frames": vad_stats.speech_frames,
-                            "total_frames": vad_stats.total_frames,
-                        },
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def main() -> None:
