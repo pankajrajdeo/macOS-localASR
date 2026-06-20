@@ -12,55 +12,27 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SOURCE_DAEMON = REPO_ROOT / "src" / "macos_local_asr" / "daemon.py"
+SOURCE_ROOT = REPO_ROOT / "src"
+SOURCE_PACKAGE_DIR = SOURCE_ROOT / "macos_local_asr"
 SOURCE_README = REPO_ROOT / "README.md"
 SOURCE_NOTICE = REPO_ROOT / "NOTICE.md"
 SOURCE_REQUIREMENTS = REPO_ROOT / "requirements.txt"
 SOURCE_MODEL_DIR = REPO_ROOT / "models" / "parakeet-tdt-0.6b-v2-onnx-int8"
 REQUIREMENTS = REPO_ROOT / "requirements.txt"
+sys.path.insert(0, str(SOURCE_ROOT))
+
+from macos_local_asr.configuration import DEFAULT_CONFIG, MODEL_FILES  # noqa: E402
 
 APP_DIR = Path.home() / "Library" / "Application Support" / "macOS-localASR"
 MODEL_DIR = APP_DIR / "models" / "parakeet-tdt-0.6b-v2-onnx-int8"
 VENV_DIR = APP_DIR / ".venv"
 LOG_DIR = APP_DIR / "logs"
+RUNTIME_PACKAGE_DIR = APP_DIR / "macos_local_asr"
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 LABEL = "com.pankajrajdeo.macos-local-asr"
 PLIST_PATH = LAUNCH_AGENTS_DIR / f"{LABEL}.plist"
 BIN_DIR = Path.home() / "bin"
 BIN_PATH = BIN_DIR / "macos-local-asr"
-
-MODEL_FILES = [
-    "config.json",
-    "vocab.txt",
-    "nemo128.onnx",
-    "nemo80.onnx",
-    "encoder-model.int8.onnx",
-    "decoder_joint-model.int8.onnx",
-    "README.md",
-    "ATTRIBUTION.md",
-]
-
-DEFAULT_CONFIG = {
-    "hotkey": "cmd+option",
-    "lock_hotkey": "ctrl+cmd+option",
-    "sample_rate": 16000,
-    "paste_into_active_app": True,
-    "copy_to_clipboard": False,
-    "preserve_clipboard": True,
-    "clipboard_restore_delay_seconds": 0.35,
-    "min_recording_seconds": 0.25,
-    "window_width": 230,
-    "window_height": 44,
-    "window_bottom_margin": 94,
-    "vad_enabled": True,
-    "vad_aggressiveness": 2,
-    "vad_frame_ms": 20,
-    "vad_start_padding_ms": 160,
-    "vad_end_padding_ms": 320,
-    "vad_min_speech_ms": 80,
-    "vad_audible_rms": 0.0025,
-}
-
 
 def run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     print("+", " ".join(args))
@@ -102,7 +74,13 @@ def create_venv() -> None:
 def install_runtime_files() -> None:
     APP_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(SOURCE_DAEMON, APP_DIR / "dictation_daemon.py")
+    if RUNTIME_PACKAGE_DIR.exists():
+        shutil.rmtree(RUNTIME_PACKAGE_DIR)
+    shutil.copytree(
+        SOURCE_PACKAGE_DIR,
+        RUNTIME_PACKAGE_DIR,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
     shutil.copy2(SOURCE_README, APP_DIR / "README.md")
     shutil.copy2(SOURCE_NOTICE, APP_DIR / "NOTICE.md")
     shutil.copy2(SOURCE_REQUIREMENTS, APP_DIR / "requirements.txt")
@@ -125,9 +103,13 @@ def install_command() -> None:
 LABEL="{LABEL}"
 PLIST="{PLIST_PATH}"
 PYTHON="{VENV_DIR}/bin/python"
-DAEMON="{APP_DIR}/dictation_daemon.py"
+APP_DIR="{APP_DIR}"
 LOG_DIR="{LOG_DIR}"
 DOMAIN="gui/$(id -u)"
+export MACOS_LOCAL_ASR_APP_DIR="$APP_DIR"
+export MACOS_LOCAL_ASR_LABEL="$LABEL"
+export MACOS_LOCAL_ASR_PLIST="$PLIST"
+export PYTHONPATH="$APP_DIR"
 
 case "${{1:-start}}" in
   start)
@@ -159,10 +141,13 @@ case "${{1:-start}}" in
     open "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
     ;;
   run)
-    MACOS_LOCAL_ASR_APP_DIR="{APP_DIR}" exec "$PYTHON" "$DAEMON"
+    exec "$PYTHON" -m macos_local_asr.daemon
     ;;
   test-ui)
-    MACOS_LOCAL_ASR_APP_DIR="{APP_DIR}" exec "$PYTHON" "$DAEMON" --test-ui
+    exec "$PYTHON" -m macos_local_asr.daemon --test-ui
+    ;;
+  config|hotkey|history|health)
+    exec "$PYTHON" -m macos_local_asr.cli "$@"
     ;;
   uninstall)
     launchctl bootout "$DOMAIN" "$PLIST" 2>/dev/null || true
@@ -172,7 +157,7 @@ case "${{1:-start}}" in
     echo "Removed macOS-localASR."
     ;;
   *)
-    echo "Usage: macos-local-asr [start|stop|restart|status|logs|permissions|run|test-ui|uninstall]"
+    echo "Usage: macos-local-asr [start|stop|restart|status|logs|permissions|run|test-ui|config|hotkey|history|health|uninstall]"
     exit 2
     ;;
 esac
@@ -186,7 +171,7 @@ def install_launch_agent() -> None:
     LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
     plist = {
         "Label": LABEL,
-        "ProgramArguments": [str(VENV_DIR / "bin" / "python"), str(APP_DIR / "dictation_daemon.py")],
+        "ProgramArguments": [str(VENV_DIR / "bin" / "python"), "-m", "macos_local_asr.daemon"],
         "RunAtLoad": True,
         "KeepAlive": False,
         "StandardOutPath": str(LOG_DIR / "launchd.out.log"),
@@ -195,6 +180,9 @@ def install_launch_agent() -> None:
         "EnvironmentVariables": {
             "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             "MACOS_LOCAL_ASR_APP_DIR": str(APP_DIR),
+            "MACOS_LOCAL_ASR_LABEL": LABEL,
+            "MACOS_LOCAL_ASR_PLIST": str(PLIST_PATH),
+            "PYTHONPATH": str(APP_DIR),
         },
     }
     with PLIST_PATH.open("wb") as handle:

@@ -93,6 +93,14 @@ For longer dictation:
 ~/bin/macos-local-asr permissions
 ~/bin/macos-local-asr run
 ~/bin/macos-local-asr test-ui
+~/bin/macos-local-asr health
+~/bin/macos-local-asr config show
+~/bin/macos-local-asr config get hotkey
+~/bin/macos-local-asr config set preserve_clipboard true
+~/bin/macos-local-asr hotkey set push cmd+option
+~/bin/macos-local-asr hotkey set lock ctrl+cmd+option
+~/bin/macos-local-asr history search meeting
+~/bin/macos-local-asr history stats
 ~/bin/macos-local-asr uninstall
 ```
 
@@ -109,7 +117,7 @@ The cloned repository is only needed for installation. The runtime is copied int
 Important runtime files:
 
 ```text
-~/Library/Application Support/macOS-localASR/dictation_daemon.py
+~/Library/Application Support/macOS-localASR/macos_local_asr/
 ~/Library/Application Support/macOS-localASR/config.json
 ~/Library/Application Support/macOS-localASR/models/parakeet-tdt-0.6b-v2-onnx-int8
 ~/Library/Application Support/macOS-localASR/logs
@@ -151,11 +159,26 @@ Default config:
   "vad_start_padding_ms": 160,
   "vad_end_padding_ms": 320,
   "vad_min_speech_ms": 80,
-  "vad_audible_rms": 0.0025
+  "vad_audible_rms": 0.0025,
+  "log_max_bytes": 1048576,
+  "log_backup_count": 5
 }
 ```
 
 Supported hotkey aliases currently include `cmd`, `command`, `option`, `alt`, `ctrl`, and `control`. Modifier-only hotkeys need Accessibility/Input Monitoring permissions.
+
+The JSON schema is documented at [`docs/config.schema.json`](docs/config.schema.json).
+
+Common config examples:
+
+```bash
+~/bin/macos-local-asr config validate
+~/bin/macos-local-asr config set preserve_clipboard true
+~/bin/macos-local-asr config set copy_to_clipboard false
+~/bin/macos-local-asr hotkey set push cmd+option
+~/bin/macos-local-asr hotkey set lock ctrl+cmd+option
+~/bin/macos-local-asr restart
+```
 
 ## Smoke Test
 
@@ -178,6 +201,12 @@ To test only the native waveform overlay:
 
 ```bash
 ~/bin/macos-local-asr test-ui
+```
+
+Run the Phase 1 unit tests:
+
+```bash
+PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
 ## Resource Use
@@ -257,6 +286,7 @@ Keep installed data/model/logs:
 
 If the hotkey does nothing:
 
+- Run `~/bin/macos-local-asr health`.
 - Re-run `~/bin/macos-local-asr permissions`.
 - Grant Accessibility and Input Monitoring to the installed Python binary.
 - Restart with `~/bin/macos-local-asr restart`.

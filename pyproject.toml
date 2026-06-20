@@ -23,6 +23,7 @@ Homepage = "https://github.com/pankajrajdeo/macOS-localASR"
 Repository = "https://github.com/pankajrajdeo/macOS-localASR"
 
 [project.scripts]
+macos-local-asr = "macos_local_asr.cli:main"
 macos-local-asr-daemon = "macos_local_asr.daemon:main"
 
 [tool.ruff]

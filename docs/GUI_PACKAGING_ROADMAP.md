@@ -310,7 +310,7 @@ Models:
 
 ## Near-Term Repo Milestones
 
-1. Add CLI config commands for hotkeys and clipboard behavior.
+1. Add CLI config commands for hotkeys and clipboard behavior. Done.
 2. Add menu-bar MVP for macOS.
 3. Add history viewer.
 4. Add optional local enhancement mode through Ollama.
@@ -326,18 +326,20 @@ Models:
 
 Goal: make the existing installed service reliable enough for daily use.
 
+Status: implemented in the Python/LaunchAgent prototype.
+
 Tasks:
 
-- Add CLI commands:
+- Add CLI commands. Done:
   - `config get`.
   - `config set`.
   - `hotkey set`.
   - `history search`.
-- Add a JSON schema for `config.json`.
+- Add a JSON schema for `config.json`. Done.
 - Add a local health command that checks model files, permissions, and worker
-  state.
-- Add tests for clipboard preservation, VAD trimming, and hotkey parsing.
-- Add log rotation.
+  state. Done.
+- Add tests for clipboard preservation, VAD trimming, and hotkey parsing. Done.
+- Add log rotation. Done.
 
 ### Milestone 2: macOS Menu-Bar MVP
 

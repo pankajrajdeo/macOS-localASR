@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import queue
 import subprocess
 import sys
@@ -68,45 +67,30 @@ from Quartz import (
 )
 from Foundation import NSData
 
-
-APP_DIR = Path(
-    os.environ.get(
-        "MACOS_LOCAL_ASR_APP_DIR",
-        str(Path.home() / "Library" / "Application Support" / "macOS-localASR"),
+try:
+    from .configuration import (
+        APP_DIR,
+        HISTORY_PATH,
+        KEY_ESC,
+        LOG_PATH,
+        MODEL_DIR,
+        hotkey_label,
+        load_config,
+        load_log_rotation_settings,
+        parse_hotkey,
     )
-)
-CONFIG_PATH = APP_DIR / "config.json"
-MODEL_DIR = Path(
-    os.environ.get(
-        "MACOS_LOCAL_ASR_MODEL_DIR",
-        str(APP_DIR / "models" / "parakeet-tdt-0.6b-v2-onnx-int8"),
+except ImportError:  # pragma: no cover - direct script fallback for local debugging
+    from configuration import (  # type: ignore
+        APP_DIR,
+        HISTORY_PATH,
+        KEY_ESC,
+        LOG_PATH,
+        MODEL_DIR,
+        hotkey_label,
+        load_config,
+        load_log_rotation_settings,
+        parse_hotkey,
     )
-)
-HISTORY_PATH = APP_DIR / "history.jsonl"
-LOG_PATH = APP_DIR / "logs" / "daemon.log"
-KEY_ESC = 53
-
-
-DEFAULT_CONFIG = {
-    "hotkey": "cmd+option",
-    "lock_hotkey": "ctrl+cmd+option",
-    "sample_rate": 16000,
-    "paste_into_active_app": True,
-    "copy_to_clipboard": False,
-    "preserve_clipboard": True,
-    "clipboard_restore_delay_seconds": 0.35,
-    "min_recording_seconds": 0.25,
-    "window_width": 230,
-    "window_height": 44,
-    "window_bottom_margin": 94,
-    "vad_enabled": True,
-    "vad_aggressiveness": 2,
-    "vad_frame_ms": 20,
-    "vad_start_padding_ms": 160,
-    "vad_end_padding_ms": 320,
-    "vad_min_speech_ms": 80,
-    "vad_audible_rms": 0.0025,
-}
 
 
 @dataclass
@@ -131,52 +115,25 @@ class VadStats:
 
 def log(message: str) -> None:
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    rotate_log_if_needed(LOG_PATH)
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     with LOG_PATH.open("a", encoding="utf-8") as handle:
         handle.write(f"[{stamp}] {message}\n")
 
 
-def load_config() -> dict[str, Any]:
-    APP_DIR.mkdir(parents=True, exist_ok=True)
-    if not CONFIG_PATH.exists():
-        CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2) + "\n", encoding="utf-8")
-        return dict(DEFAULT_CONFIG)
-    config = dict(DEFAULT_CONFIG)
-    config.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
-    return config
-
-
-def normalize_key(name: str) -> str:
-    normalized = name.strip().lower()
-    aliases = {
-        "key.cmd": "cmd",
-        "key.cmd_l": "cmd",
-        "key.cmd_r": "cmd",
-        "key.alt": "option",
-        "key.alt_l": "option",
-        "key.alt_r": "option",
-        "alt": "option",
-        "option": "option",
-        "command": "cmd",
-        "cmd": "cmd",
-        "control": "ctrl",
-        "ctrl": "ctrl",
-        "key.ctrl": "ctrl",
-        "key.ctrl_l": "ctrl",
-        "key.ctrl_r": "ctrl",
-    }
-    return aliases.get(normalized, normalized)
-
-
-def parse_hotkey(value: str) -> frozenset[str]:
-    return frozenset(normalize_key(part) for part in value.split("+") if part.strip())
-
-
-def hotkey_label(keys: set[str] | frozenset[str]) -> str:
-    labels = {"cmd": "Command", "option": "Option", "ctrl": "Control"}
-    ordered = [key for key in ("ctrl", "cmd", "option") if key in keys]
-    ordered.extend(sorted(keys.difference(ordered)))
-    return " + ".join(labels.get(key, key) for key in ordered)
+def rotate_log_if_needed(path: Path) -> None:
+    max_bytes, backup_count = load_log_rotation_settings()
+    if backup_count <= 0 or max_bytes <= 0 or not path.exists() or path.stat().st_size < max_bytes:
+        return
+    oldest = path.with_name(f"{path.name}.{backup_count}")
+    if oldest.exists():
+        oldest.unlink()
+    for index in range(backup_count - 1, 0, -1):
+        src = path.with_name(f"{path.name}.{index}")
+        dst = path.with_name(f"{path.name}.{index + 1}")
+        if src.exists():
+            src.replace(dst)
+    path.replace(path.with_name(f"{path.name}.1"))
 
 
 def write_wav(path: Path, audio: np.ndarray, sample_rate: int) -> None:

@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "macOS-localASR configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "hotkey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "lock_hotkey": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sample_rate": {
+      "type": "integer",
+      "enum": [
+        16000
+      ]
+    },
+    "paste_into_active_app": {
+      "type": "boolean"
+    },
+    "copy_to_clipboard": {
+      "type": "boolean"
+    },
+    "preserve_clipboard": {
+      "type": "boolean"
+    },
+    "clipboard_restore_delay_seconds": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 3
+    },
+    "min_recording_seconds": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 30
+    },
+    "window_width": {
+      "type": "integer",
+      "minimum": 120,
+      "maximum": 800
+    },
+    "window_height": {
+      "type": "integer",
+      "minimum": 28,
+      "maximum": 240
+    },
+    "window_bottom_margin": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 800
+    },
+    "vad_enabled": {
+      "type": "boolean"
+    },
+    "vad_aggressiveness": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3
+    },
+    "vad_frame_ms": {
+      "type": "integer",
+      "enum": [
+        10,
+        20,
+        30
+      ]
+    },
+    "vad_start_padding_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2000
+    },
+    "vad_end_padding_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3000
+    },
+    "vad_min_speech_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5000
+    },
+    "vad_audible_rms": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "log_max_bytes": {
+      "type": "integer",
+      "minimum": 65536,
+      "maximum": 104857600
+    },
+    "log_backup_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 50
+    }
+  }
+}
