@@ -63,11 +63,15 @@ final class ASRController: ObservableObject {
     @Published var historyText = "Search or load stats to view local dictation history."
     @Published var fileTranscriptionStatus = "Choose an audio/video file or paste a URL."
     @Published var fileTranscriptionText = ""
+    @Published var fileTranscriptionProgress: Double?
+    @Published var fileTranscriptionProgressText = ""
+    @Published var fileTranscriptionIsRunning = false
     @Published var selectedFilePath = ""
     @Published var selectedOutputPath = ""
     @Published var lastCommandOutput = ""
 
     private var pollTimer: Timer?
+    private var fileTranscriptionHadResult = false
     private var commandURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("bin")
@@ -299,9 +303,14 @@ final class ASRController: ObservableObject {
             fileTranscriptionStatus = "Choose a file or enter a URL first."
             return
         }
-        fileTranscriptionStatus = "Transcribing..."
+        fileTranscriptionStatus = "Starting transcription..."
         fileTranscriptionText = ""
-        var args = ["transcribe", isWebURL(trimmed) ? "url" : "file", trimmed, "--json"]
+        fileTranscriptionProgress = 0
+        fileTranscriptionProgressText = "Starting"
+        fileTranscriptionIsRunning = true
+        fileTranscriptionHadResult = false
+
+        var args = ["transcribe", isWebURL(trimmed) ? "url" : "file", trimmed, "--progress-json"]
         let outputPath = output.trimmingCharacters(in: .whitespacesAndNewlines)
         if !outputPath.isEmpty {
             args.append(contentsOf: ["--output", outputPath])
@@ -309,19 +318,53 @@ final class ASRController: ObservableObject {
         if noCleanup {
             args.append("--no-cleanup")
         }
-        run(args) { [weak self] result in
+
+        runStreaming(args) { [weak self] line in
             guard let self else { return }
-            guard let data = result.stdout.data(using: .utf8),
-                  let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            self.handleTranscriptionLine(line, fallbackOutputPath: outputPath)
+        } completion: { [weak self] result in
+            guard let self else { return }
+            self.fileTranscriptionIsRunning = false
+            if !self.fileTranscriptionHadResult {
+                self.fileTranscriptionProgress = nil
+                self.fileTranscriptionProgressText = ""
                 self.fileTranscriptionStatus = result.stderr.isEmpty ? "Transcription failed." : result.stderr
-                return
             }
-            if payload["ok"] as? Bool == true {
-                self.fileTranscriptionText = payload["text"] as? String ?? ""
-                self.selectedOutputPath = payload["output_path"] as? String ?? outputPath
-                self.fileTranscriptionStatus = "Wrote \(self.selectedOutputPath)"
+        }
+    }
+
+    private func handleTranscriptionLine(_ line: String, fallbackOutputPath: String) {
+        guard let data = line.data(using: .utf8),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+        let type = payload["type"] as? String
+        if type == "progress" {
+            let value = payload["progress"] as? Double ?? fileTranscriptionProgress ?? 0
+            fileTranscriptionProgress = min(max(value, 0), 1)
+            let message = payload["message"] as? String ?? "Working"
+            if let current = payload["current"] as? Int, let total = payload["total"] as? Int, total > 1 {
+                fileTranscriptionProgressText = "\(message) (\(current)/\(total))"
             } else {
-                self.fileTranscriptionStatus = payload["error"] as? String ?? "Transcription failed."
+                fileTranscriptionProgressText = message
+            }
+            fileTranscriptionStatus = fileTranscriptionProgressText
+            return
+        }
+
+        if type == "result" || payload["ok"] != nil {
+            fileTranscriptionHadResult = true
+            fileTranscriptionIsRunning = false
+            if payload["ok"] as? Bool == true {
+                fileTranscriptionProgress = 1
+                fileTranscriptionText = payload["text"] as? String ?? ""
+                selectedOutputPath = payload["output_path"] as? String ?? fallbackOutputPath
+                fileTranscriptionStatus = "Wrote \(selectedOutputPath)"
+                fileTranscriptionProgressText = "Complete"
+            } else {
+                fileTranscriptionProgress = nil
+                fileTranscriptionProgressText = ""
+                fileTranscriptionStatus = payload["error"] as? String ?? "Transcription failed."
             }
         }
     }
@@ -373,6 +416,69 @@ final class ASRController: ObservableObject {
                 try process.run()
                 process.waitUntilExit()
                 let stdout = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                let stderr = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                let result = CommandResult(status: process.terminationStatus, stdout: stdout, stderr: stderr)
+                Task { @MainActor in
+                    completion(result)
+                }
+            } catch {
+                let result = CommandResult(status: 1, stdout: "", stderr: error.localizedDescription)
+                Task { @MainActor in
+                    completion(result)
+                }
+            }
+        }
+    }
+
+    private func runStreaming(
+        _ arguments: [String],
+        onStdoutLine: @escaping @MainActor (String) -> Void,
+        completion: @escaping @MainActor (CommandResult) -> Void
+    ) {
+        let url = commandURL
+        DispatchQueue.global(qos: .utility).async {
+            let process = Process()
+            process.executableURL = url
+            process.arguments = arguments
+
+            let output = Pipe()
+            let error = Pipe()
+            process.standardOutput = output
+            process.standardError = error
+
+            var stdout = ""
+            var lineBuffer = ""
+
+            func emitCompleteLines(_ text: String) {
+                lineBuffer += text
+                while let newline = lineBuffer.firstIndex(of: "\n") {
+                    let line = String(lineBuffer[..<newline])
+                    lineBuffer.removeSubrange(...newline)
+                    Task { @MainActor in
+                        onStdoutLine(line)
+                    }
+                }
+            }
+
+            do {
+                try process.run()
+                while true {
+                    let data = output.fileHandleForReading.availableData
+                    if data.isEmpty {
+                        break
+                    }
+                    let chunk = String(data: data, encoding: .utf8) ?? ""
+                    stdout += chunk
+                    emitCompleteLines(chunk)
+                }
+                process.waitUntilExit()
+                if !lineBuffer.isEmpty {
+                    let line = lineBuffer
+                    lineBuffer = ""
+                    Task { @MainActor in
+                        onStdoutLine(line)
+                    }
+                }
                 let stderr = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
                 let result = CommandResult(status: process.terminationStatus, stdout: stdout, stderr: stderr)
                 Task { @MainActor in
@@ -831,10 +937,22 @@ struct TranscribeSettingsView: View {
                 Button("Transcribe") {
                     controller.transcribeFileOrURL(input: input, output: output, noCleanup: noCleanup)
                 }
+                .disabled(controller.fileTranscriptionIsRunning)
                 Button("Reveal Transcript") {
                     if !controller.selectedOutputPath.isEmpty {
                         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: controller.selectedOutputPath)])
                     }
+                }
+                .disabled(controller.selectedOutputPath.isEmpty || controller.fileTranscriptionIsRunning)
+            }
+
+            if let progress = controller.fileTranscriptionProgress {
+                VStack(alignment: .leading, spacing: 6) {
+                    ProgressView(value: progress)
+                    Text(controller.fileTranscriptionProgressText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
             }
 

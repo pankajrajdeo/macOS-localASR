@@ -241,16 +241,29 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     source = args.source
     output_path = Path(args.output).expanduser() if args.output else None
     cleanup_enabled = False if args.no_cleanup else None
+
+    def emit_progress(payload: dict[str, Any]) -> None:
+        if not args.progress_json:
+            return
+        event = {"type": "progress", **payload}
+        print(json.dumps(event, ensure_ascii=False), flush=True)
+
     try:
         result = transcribe_source(
             source,
             output_path=output_path,
             config=config,
             cleanup_enabled=cleanup_enabled,
+            progress=emit_progress if args.progress_json else None,
         )
     except TranscriptionError as exc:
-        if args.json:
-            print_json({"ok": False, "error": str(exc), "source": source})
+        if args.json or args.progress_json:
+            payload = {"ok": False, "error": str(exc), "source": source}
+            if args.progress_json:
+                payload["type"] = "result"
+                print(json.dumps(payload, ensure_ascii=False), flush=True)
+            else:
+                print_json(payload)
         else:
             print(f"Transcription failed: {exc}", file=sys.stderr)
         return 1
@@ -261,10 +274,13 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         "output_path": str(result.output_path),
         "text": result.text,
         "raw_text": result.raw_text,
+        "audio_sec": result.audio_sec,
         "asr_latency_sec": result.asr_latency_sec,
         "cleanup_latency_sec": result.cleanup_latency_sec,
     }
-    if args.json:
+    if args.progress_json:
+        print(json.dumps({"type": "result", **payload}, ensure_ascii=False), flush=True)
+    elif args.json:
         print_json(payload)
     else:
         print(result.text)
@@ -414,12 +430,14 @@ def build_parser() -> argparse.ArgumentParser:
     transcribe_file.add_argument("source")
     transcribe_file.add_argument("-o", "--output", help="Output transcript path. Defaults to transcript.txt next to the source.")
     transcribe_file.add_argument("--json", action="store_true")
+    transcribe_file.add_argument("--progress-json", action="store_true", help="Stream JSON progress events before the result.")
     transcribe_file.add_argument("--no-cleanup", action="store_true", help="Disable cleanup for this transcription.")
     transcribe_file.set_defaults(func=cmd_transcribe)
     transcribe_url = transcribe_sub.add_parser("url", help="Transcribe a YouTube or direct media URL.")
     transcribe_url.add_argument("source")
     transcribe_url.add_argument("-o", "--output", help="Output transcript path. Defaults to ./transcript.txt.")
     transcribe_url.add_argument("--json", action="store_true")
+    transcribe_url.add_argument("--progress-json", action="store_true", help="Stream JSON progress events before the result.")
     transcribe_url.add_argument("--no-cleanup", action="store_true", help="Disable cleanup for this transcription.")
     transcribe_url.set_defaults(func=cmd_transcribe)
 

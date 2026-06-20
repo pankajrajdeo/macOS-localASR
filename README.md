@@ -239,6 +239,7 @@ The menu-bar Settings window includes a `Transcribe` tab for one-off audio/video
 - browse for a local audio/video file, or paste a YouTube/direct media URL
 - choose where to save `transcript.txt`
 - optionally disable cleanup for that file
+- watch progress while the app downloads, converts, chunks, transcribes, cleans up, and writes the transcript
 - preview the transcript after completion
 
 CLI equivalents:
@@ -246,9 +247,12 @@ CLI equivalents:
 ```bash
 ~/bin/macos-local-asr transcribe file /path/to/recording.wav --output ~/Desktop/transcript.txt
 ~/bin/macos-local-asr transcribe url "https://www.youtube.com/watch?v=..." --output ~/Desktop/transcript.txt
+~/bin/macos-local-asr transcribe file /path/to/recording.wav --progress-json
 ```
 
 URL transcription uses `yt-dlp` and `ffmpeg` in a temporary directory. The app writes only the final transcript to the chosen output path; downloaded/converted media is deleted when the job finishes. Only transcribe media that you have the right to access and process.
+
+Long files are split into temporary 10-minute WAV chunks before local ONNX ASR. Chunks are deleted with the temporary working directory after the job finishes.
 
 ## Smoke Test
 

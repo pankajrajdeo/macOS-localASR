@@ -14,7 +14,9 @@ from macos_local_asr.transcription import (
     is_url,
     is_youtube_url,
     require_executable,
+    split_wav_for_transcription,
     summarize_downloader_error,
+    transcribe_source,
 )
 
 
@@ -104,6 +106,52 @@ class TranscriptionHelperTests(unittest.TestCase):
                 calls[1][1]["extractor_args"],
                 {"youtube": {"player_client": ["default", "-android_sdkless"]}},
             )
+
+    def test_long_wav_is_split_into_temp_chunks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_dir = Path(tmp)
+            wav_path = temp_dir / "input.wav"
+            wav_path.write_bytes(b"wav")
+
+            def fake_run_command(_args: list[str]) -> None:
+                (temp_dir / "chunk_000.wav").write_bytes(b"one")
+                (temp_dir / "chunk_001.wav").write_bytes(b"two")
+
+            with patch("macos_local_asr.transcription.require_executable", return_value="/usr/local/bin/ffmpeg"), patch(
+                "macos_local_asr.transcription.run_command", side_effect=fake_run_command
+            ):
+                chunks = split_wav_for_transcription(wav_path, temp_dir, 1_201)
+
+            self.assertEqual(chunks, [temp_dir / "chunk_000.wav", temp_dir / "chunk_001.wav"])
+
+    def test_transcribe_source_emits_chunk_progress_events(self) -> None:
+        class FakeModel:
+            def recognize(self, path: Path, *, sample_rate: int) -> str:
+                return f"text from {path.name} at {sample_rate}"
+
+        events: list[dict[str, object]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "transcript.txt"
+            chunks = [Path(tmp) / "chunk_000.wav", Path(tmp) / "chunk_001.wav"]
+            with patch("macos_local_asr.transcription.convert_to_wav"), patch(
+                "macos_local_asr.transcription.get_audio_duration", return_value=1_201.0
+            ), patch("macos_local_asr.transcription.split_wav_for_transcription", return_value=chunks), patch(
+                "macos_local_asr.transcription.load_asr_model", return_value=FakeModel()
+            ):
+                result = transcribe_source(
+                    "/tmp/source.wav",
+                    output_path=output_path,
+                    config={"sample_rate": 16000, "cleanup_enabled": False},
+                    progress=events.append,
+                )
+            self.assertTrue(output_path.exists())
+
+        asr_events = [event for event in events if event.get("stage") == "asr"]
+        chunk_events = [event for event in asr_events if str(event.get("message", "")).startswith("Transcribing chunk")]
+        self.assertEqual(len(chunk_events), 2)
+        self.assertEqual(events[-1]["stage"], "complete")
+        self.assertEqual(result.audio_sec, 1_201.0)
+        self.assertIn("text from chunk_000.wav", result.raw_text)
 
 
 if __name__ == "__main__":

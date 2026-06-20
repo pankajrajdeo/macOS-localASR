@@ -7,8 +7,9 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from math import ceil
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import onnx_asr
@@ -30,6 +31,9 @@ _YOUTUBE_HOSTS = {
     "www.youtube-nocookie.com",
 }
 _YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{3,}$")
+CHUNK_DURATION_SEC = 10 * 60
+CHUNKING_THRESHOLD_SEC = 10 * 60
+ProgressCallback = Callable[[dict[str, Any]], None]
 
 
 class _SilentYtdlpLogger:
@@ -163,6 +167,33 @@ def run_command(args: list[str]) -> None:
         raise TranscriptionError(summarize_downloader_error(detail))
 
 
+def get_audio_duration(path: Path) -> float | None:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None
+    result = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "quiet",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        return None
+
+
 def convert_to_wav(input_path: Path, output_path: Path, sample_rate: int) -> None:
     if not input_path.exists():
         raise TranscriptionError(f"Input file not found: {input_path}")
@@ -185,7 +216,12 @@ def convert_to_wav(input_path: Path, output_path: Path, sample_rate: int) -> Non
     )
 
 
-def download_url_to_media(url: str, temp_dir: Path) -> Path:
+def _emit(callback: ProgressCallback | None, **payload: Any) -> None:
+    if callback is not None:
+        callback(payload)
+
+
+def download_url_to_media(url: str, temp_dir: Path, progress: ProgressCallback | None = None) -> Path:
     download_url = canonical_watch_url(url) if is_youtube_url(url) else url
     if not download_url:
         raise TranscriptionError("Could not determine YouTube video id.")
@@ -210,7 +246,13 @@ def download_url_to_media(url: str, temp_dir: Path) -> Path:
     attempts.append(base_options)
 
     errors: list[str] = []
-    for options in attempts:
+    for index, options in enumerate(attempts, start=1):
+        _emit(
+            progress,
+            stage="download",
+            progress=0.08,
+            message=f"Downloading audio ({index}/{len(attempts)})",
+        )
         try:
             return _download_with_ytdlp(download_url, temp_dir, options)
         except TranscriptionError as exc:
@@ -242,9 +284,45 @@ def _download_with_ytdlp(url: str, temp_dir: Path, options: dict[str, Any]) -> P
     return downloaded[0]
 
 
-def download_url_to_wav(url: str, output_path: Path, sample_rate: int, temp_dir: Path) -> None:
-    media_path = download_url_to_media(url, temp_dir)
+def download_url_to_wav(
+    url: str,
+    output_path: Path,
+    sample_rate: int,
+    temp_dir: Path,
+    progress: ProgressCallback | None = None,
+) -> None:
+    media_path = download_url_to_media(url, temp_dir, progress)
+    _emit(progress, stage="convert", progress=0.22, message="Converting audio")
     convert_to_wav(media_path, output_path, sample_rate)
+
+
+def split_wav_for_transcription(wav_path: Path, temp_dir: Path, duration_sec: float | None) -> list[Path]:
+    if not duration_sec or duration_sec <= CHUNKING_THRESHOLD_SEC:
+        return [wav_path]
+    ffmpeg = require_executable("ffmpeg")
+    chunk_pattern = temp_dir / "chunk_%03d.wav"
+    run_command(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(wav_path),
+            "-f",
+            "segment",
+            "-segment_time",
+            str(CHUNK_DURATION_SEC),
+            "-reset_timestamps",
+            "1",
+            str(chunk_pattern),
+        ]
+    )
+    chunks = sorted(temp_dir.glob("chunk_*.wav"))
+    if not chunks:
+        raise TranscriptionError("Audio chunking produced no chunks")
+    return chunks
 
 
 def load_asr_model() -> Any:
@@ -262,6 +340,7 @@ def transcribe_source(
     output_path: Path | None = None,
     config: dict[str, Any],
     cleanup_enabled: bool | None = None,
+    progress: ProgressCallback | None = None,
 ) -> TranscriptionResult:
     sample_rate = int(config.get("sample_rate", 16000))
     destination = Path(output_path).expanduser() if output_path else default_output_path(source)
@@ -271,13 +350,44 @@ def transcribe_source(
         temp_dir = Path(tmp)
         wav_path = temp_dir / "input.wav"
         if is_url(source):
-            download_url_to_wav(source, wav_path, sample_rate, temp_dir)
+            _emit(progress, stage="prepare", progress=0.02, message="Preparing URL")
+            download_url_to_wav(source, wav_path, sample_rate, temp_dir, progress)
         else:
+            _emit(progress, stage="convert", progress=0.08, message="Converting audio")
             convert_to_wav(Path(source).expanduser(), wav_path, sample_rate)
 
+        duration_sec = get_audio_duration(wav_path)
+        _emit(progress, stage="chunk", progress=0.28, message="Checking audio length", audio_sec=duration_sec)
+        chunks = split_wav_for_transcription(wav_path, temp_dir, duration_sec)
+        total_chunks = len(chunks)
+        if total_chunks > 1:
+            _emit(
+                progress,
+                stage="chunk",
+                progress=0.32,
+                message=f"Split into {total_chunks} chunks",
+                current=0,
+                total=total_chunks,
+                audio_sec=duration_sec,
+            )
+
+        _emit(progress, stage="load_model", progress=0.36, message="Loading ASR model")
         model = load_asr_model()
         started = time.perf_counter()
-        raw_text = str(model.recognize(wav_path, sample_rate=sample_rate)).strip()
+        raw_parts: list[str] = []
+        for index, chunk in enumerate(chunks, start=1):
+            chunk_progress = 0.40 + (0.48 * ((index - 1) / max(total_chunks, 1)))
+            _emit(
+                progress,
+                stage="asr",
+                progress=chunk_progress,
+                message=f"Transcribing chunk {index}/{total_chunks}",
+                current=index,
+                total=total_chunks,
+            )
+            raw_parts.append(str(model.recognize(chunk, sample_rate=sample_rate)).strip())
+        _emit(progress, stage="asr", progress=0.88, message="Finished ASR", current=total_chunks, total=total_chunks)
+        raw_text = "\n\n".join(part for part in raw_parts if part).strip()
         asr_latency = time.perf_counter() - started
 
     runtime_config = dict(config)
@@ -287,6 +397,7 @@ def transcribe_source(
     text = raw_text
     cleanup_latency = 0.0
     if raw_text and runtime_config.get("cleanup_enabled", False):
+        _emit(progress, stage="cleanup", progress=0.92, message="Cleaning transcript")
         cleanup_started = time.perf_counter()
         try:
             text = cleanup_text(raw_text, runtime_config)
@@ -294,13 +405,15 @@ def transcribe_source(
             text = raw_text
         cleanup_latency = time.perf_counter() - cleanup_started
 
+    _emit(progress, stage="write", progress=0.98, message="Writing transcript")
     destination.write_text(text + ("\n" if text else ""), encoding="utf-8")
+    _emit(progress, stage="complete", progress=1.0, message=f"Wrote {destination}")
     return TranscriptionResult(
         source=source,
         output_path=destination,
         text=text,
         raw_text=raw_text,
-        audio_sec=None,
+        audio_sec=duration_sec,
         asr_latency_sec=asr_latency,
         cleanup_latency_sec=cleanup_latency,
     )
