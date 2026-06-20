@@ -21,6 +21,119 @@ Core promise:
 - Minimal idle CPU.
 - Clear permissions onboarding.
 
+## Original UI Direction
+
+The UI should not copy another dictation app. The product category has common
+needs, but the visual design should be ours: compact, native, quiet, and
+trustworthy.
+
+Design principles:
+
+- Native first: use platform controls, SF Symbols on macOS, and standard menu
+  bar/tray conventions.
+- Status before settings: the first thing a user sees should be whether the app
+  is ready, recording, transcribing, missing permissions, or missing models.
+- One primary action: record now. Everything else is secondary.
+- No dashboard heaviness: statistics and history should be useful, not the main
+  surface.
+- No decorative interface chrome: this is a productivity utility, not a media
+  app.
+- No hidden privacy tradeoffs: local/raw mode, enhancement mode, and clipboard
+  behavior must be explicit.
+
+### Proposed macOS Menu-Bar Popover
+
+Use a narrow popover with four zones.
+
+1. Status header:
+   - App name and current state.
+   - Small live waveform when recording.
+   - Model state: ready, loading, missing, error.
+
+2. Record controls:
+   - `Start Recording` / `Stop and Paste`.
+   - `Push-to-talk` hotkey label.
+   - `Locked recording` hotkey label.
+   - `Cancel current recording` when active.
+
+3. Mode toggles:
+   - Preserve clipboard.
+   - Auto-stop on silence.
+   - Enhance transcript.
+   - Insert punctuation commands.
+
+4. Utility links:
+   - History.
+   - Prompts.
+   - Settings.
+   - Check permissions.
+   - Restart worker.
+   - Quit.
+
+The popover should be functional, not a clone of any reference. Use our own
+spacing, labels, icon choices, and information hierarchy.
+
+### Settings Windows
+
+Settings should use separate native windows/tabs rather than stuffing everything
+into the menu popover.
+
+General:
+
+- Launch at login.
+- Preserve clipboard.
+- Paste into active app.
+- Keep transcript history.
+- Auto-stop behavior.
+
+Hotkeys:
+
+- Push-to-talk.
+- Toggle/locked recording.
+- Cancel.
+- Record new hotkey.
+- Reset defaults.
+
+Models:
+
+- ASR model installed status.
+- Optional enhancement model installed status.
+- Download, verify, remove.
+- CPU/RAM estimate for each optional model.
+
+Prompts:
+
+- Raw transcript.
+- Quick Note.
+- Email.
+- Meeting Notes.
+- Code / Developer.
+- Custom.
+
+History:
+
+- Search.
+- Copy.
+- Reinsert.
+- Delete.
+- Export JSON/CSV.
+
+### Recording HUD
+
+Keep the HUD separate from the menu-bar popover.
+
+The HUD should stay tiny and focus-safe:
+
+- Small bottom-center waveform.
+- Different tint for locked mode.
+- Subtle transcribing state.
+- No text unless there is an error.
+- Never steals focus.
+- Never becomes clickable.
+
+This avoids the most common system-wide dictation bug: losing the insertion
+cursor in the target app.
+
 ## Current Status
 
 Implemented:
@@ -102,53 +215,6 @@ Use:
 Windows should not be the first packaging target unless the worker is moved out
 of Python. Shipping a Python ASR app on Windows is possible, but install size,
 driver issues, antivirus false positives, and code signing are harder.
-
-## Menu-Bar UX
-
-Menu popover:
-
-- Start Recording / Stop Recording.
-- Hotkeys.
-- Custom Prompts.
-- Enhance Mode toggle.
-- Preserve Clipboard toggle.
-- Permissions:
-  - Microphone.
-  - Accessibility.
-  - Input Monitoring.
-- Statistics:
-  - Today's words.
-  - Total words.
-  - Characters typed.
-  - Time saved.
-- Show History.
-- Restart.
-- Quit.
-
-Settings windows:
-
-- Hotkeys:
-  - Toggle mode.
-  - Push-to-talk mode.
-  - Record new hotkey.
-  - Reset defaults.
-- Custom Prompts:
-  - Default.
-  - Quick Note.
-  - Email Draft.
-  - Meeting Notes.
-  - Code Review.
-  - Creative Writing.
-- History:
-  - Search.
-  - Copy.
-  - Reinsert.
-  - Delete.
-  - Export.
-- Models:
-  - ASR model status.
-  - Optional enhancement model status.
-  - Download/remove models.
 
 ## Enhancement Mode
 
@@ -254,3 +320,104 @@ Models:
 8. Package signed macOS release.
 9. Start Windows tray app.
 
+## Implementation Plan
+
+### Milestone 1: Stabilize Current Prototype
+
+Goal: make the existing installed service reliable enough for daily use.
+
+Tasks:
+
+- Add CLI commands:
+  - `config get`.
+  - `config set`.
+  - `hotkey set`.
+  - `history search`.
+- Add a JSON schema for `config.json`.
+- Add a local health command that checks model files, permissions, and worker
+  state.
+- Add tests for clipboard preservation, VAD trimming, and hotkey parsing.
+- Add log rotation.
+
+### Milestone 2: macOS Menu-Bar MVP
+
+Goal: ship a real `.app` shell without replacing the worker yet.
+
+Tasks:
+
+- Create `apps/macos/LocalASR.xcodeproj`.
+- Build a SwiftUI `MenuBarExtra` app.
+- Add first-run permission onboarding.
+- Add a status popover with recording controls.
+- Add settings tabs for General and Hotkeys.
+- Start/stop the existing worker from the app.
+- Communicate with the worker over a local socket.
+- Keep the existing Python worker bundled for this milestone.
+
+### Milestone 3: Native Settings and History
+
+Goal: make it usable by non-technical users.
+
+Tasks:
+
+- Hotkey recorder UI.
+- History window with search/copy/delete.
+- Permissions diagnostic panel.
+- Model status/download panel.
+- Basic usage statistics from local history.
+- Export/import settings.
+
+### Milestone 4: Optional Enhancement Mode
+
+Goal: improve text only when the user explicitly asks for it.
+
+Tasks:
+
+- Add enhancement toggle.
+- Add prompt templates.
+- Add Ollama adapter.
+- Support `lfm2.5-350m` as the default lightweight cleanup model.
+- Support `lfm2.5-1.2b-instruct` for heavier custom prompts.
+- Add idle unload behavior for the enhancement model.
+- Evaluate latency, RAM, and text quality before enabling by default.
+
+### Milestone 5: Native Worker
+
+Goal: remove the Python runtime from packaged releases.
+
+Tasks:
+
+- Create `crates/asr-worker`.
+- Port config, VAD, recording, and paste IPC contracts.
+- Run ONNX Runtime from Rust.
+- Keep SwiftUI app as the macOS shell.
+- Keep model files outside the app bundle in Application Support.
+- Maintain the Python worker only as a development fallback.
+
+### Milestone 6: Signed macOS Release
+
+Goal: distribute a normal installable app.
+
+Tasks:
+
+- Developer ID signing.
+- Notarization.
+- DMG build.
+- First-run model download.
+- SHA256 verification.
+- Sparkle updates.
+- Crash/log collection only if the user explicitly opts in.
+
+### Milestone 7: Windows Tray App
+
+Goal: reuse the native worker and add Windows UI.
+
+Tasks:
+
+- Tray app shell.
+- Global hotkeys.
+- WASAPI microphone capture.
+- Clipboard-preserving paste.
+- Windows installer.
+- Code signing.
+- Model download and verification.
