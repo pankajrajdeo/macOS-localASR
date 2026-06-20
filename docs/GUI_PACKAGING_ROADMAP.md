@@ -155,6 +155,8 @@ Implemented:
 - History search and stats in the GUI.
 - Optional ASR cleanup through Ollama or OpenAI-compatible APIs.
 - Hidden cleanup guard prompt plus editable user style guide.
+- Local file and YouTube/direct URL transcription to `transcript.txt`.
+- Debounced modifier-key recorder for multi-key hotkey capture.
 
 Missing for a proper product:
 
@@ -165,7 +167,6 @@ Missing for a proper product:
 - Polished permission status UI.
 - Keychain storage for API keys.
 - Optional bundled local cleanup model.
-- File transcription.
 - Notarized macOS packaging.
 - Windows tray packaging.
 - Auto-update.
@@ -330,7 +331,7 @@ Models:
 3. Add manual `.app` bundle builder. Done.
 4. Add history viewer. Done in the settings UI.
 5. Add optional cleanup mode through Ollama and OpenAI-compatible APIs. Done.
-6. Add file transcription without diarization.
+6. Add file/URL transcription without diarization. Done.
 7. Add internal audio transcription research spike.
 8. Replace Python worker with native ONNX worker.
 9. Package signed macOS release.
@@ -392,6 +393,7 @@ Tasks:
 - Permissions diagnostic panel. Basic health output is done; polished permission rows are pending.
 - Model status/download panel. Pending.
 - Basic usage statistics from local history. Done.
+- File/URL transcription tab. Done for single-speaker transcripts without diarization.
 - Export/import settings.
 
 ### Milestone 4: Optional Enhancement Mode

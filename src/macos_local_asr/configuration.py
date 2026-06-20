@@ -32,11 +32,15 @@ MODEL_FILES = [
     "ATTRIBUTION.md",
 ]
 
-DEFAULT_CLEANUP_PROMPT = """Light cleanup style:
-- Fix punctuation, capitalization, spacing, and obvious ASR slips.
-- Preserve the speaker's wording and meaning.
-- Keep the original language.
-- Do not summarize or rewrite heavily."""
+DEFAULT_CLEANUP_PROMPT = """General ASR cleanup style:
+- Produce a readable transcript, not a summary or response.
+- Add sentence punctuation, capitalization, and paragraph breaks only where clearly supported.
+- Preserve the speaker's meaning, wording, order, language, and code-switching.
+- Preserve named entities, technical terms, acronyms, drug names, gene/protein names, product names, measurements, units, dates, times, negation, and uncertainty.
+- Fix only high-confidence ASR slips; if a word or phrase is ambiguous, keep the original wording.
+- Remove only obvious filler words and repeated false starts when they do not change meaning.
+- Do not invent missing content, expand abbreviations, explain, answer questions, or convert the transcript into notes.
+- Output plain text only."""
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "hotkey": "cmd+option",

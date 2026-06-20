@@ -61,6 +61,10 @@ final class ASRController: ObservableObject {
     @Published var statusText = "Checking service"
     @Published var healthText = "Not checked"
     @Published var historyText = "Search or load stats to view local dictation history."
+    @Published var fileTranscriptionStatus = "Choose an audio/video file or paste a URL."
+    @Published var fileTranscriptionText = ""
+    @Published var selectedFilePath = ""
+    @Published var selectedOutputPath = ""
     @Published var lastCommandOutput = ""
 
     private var pollTimer: Timer?
@@ -267,6 +271,68 @@ final class ASRController: ObservableObject {
         }
     }
 
+    func chooseTranscriptionFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = []
+        if panel.runModal() == .OK, let url = panel.url {
+            selectedFilePath = url.path
+            if selectedOutputPath.isEmpty {
+                selectedOutputPath = url.deletingLastPathComponent().appendingPathComponent("transcript.txt").path
+            }
+        }
+    }
+
+    func chooseTranscriptOutput() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "transcript.txt"
+        if panel.runModal() == .OK, let url = panel.url {
+            selectedOutputPath = url.path
+        }
+    }
+
+    func transcribeFileOrURL(input: String, output: String, noCleanup: Bool) {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            fileTranscriptionStatus = "Choose a file or enter a URL first."
+            return
+        }
+        fileTranscriptionStatus = "Transcribing..."
+        fileTranscriptionText = ""
+        var args = ["transcribe", isWebURL(trimmed) ? "url" : "file", trimmed, "--json"]
+        let outputPath = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !outputPath.isEmpty {
+            args.append(contentsOf: ["--output", outputPath])
+        }
+        if noCleanup {
+            args.append("--no-cleanup")
+        }
+        run(args) { [weak self] result in
+            guard let self else { return }
+            guard let data = result.stdout.data(using: .utf8),
+                  let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                self.fileTranscriptionStatus = result.stderr.isEmpty ? "Transcription failed." : result.stderr
+                return
+            }
+            if payload["ok"] as? Bool == true {
+                self.fileTranscriptionText = payload["text"] as? String ?? ""
+                self.selectedOutputPath = payload["output_path"] as? String ?? outputPath
+                self.fileTranscriptionStatus = "Wrote \(self.selectedOutputPath)"
+            } else {
+                self.fileTranscriptionStatus = payload["error"] as? String ?? "Transcription failed."
+            }
+        }
+    }
+
+    private func isWebURL(_ value: String) -> Bool {
+        guard let url = URL(string: value), let scheme = url.scheme?.lowercased() else {
+            return false
+        }
+        return (scheme == "http" || scheme == "https") && url.host != nil
+    }
+
     func setConfig(_ key: String, value: String) {
         run(["config", "set", key, value]) { [weak self] result in
             self?.lastCommandOutput = result.stdout.isEmpty ? result.stderr : result.stdout
@@ -460,6 +526,10 @@ struct SettingsView: View {
                 .tabItem {
                     Label("Enhance", systemImage: "sparkles")
                 }
+            TranscribeSettingsView()
+                .tabItem {
+                    Label("Transcribe", systemImage: "doc.text.magnifyingglass")
+                }
             HealthSettingsView()
                 .tabItem {
                     Label("Health", systemImage: "checkmark.seal")
@@ -555,9 +625,11 @@ struct HotkeyRecorderButton: View {
     let onRecord: (String) -> Void
     @State private var isRecording = false
     @State private var monitor: Any?
+    @State private var pendingValue = ""
+    @State private var finalizeTimer: Timer?
 
     var body: some View {
-        Button(isRecording ? "Press modifiers..." : title) {
+        Button(isRecording ? (pendingValue.isEmpty ? "Press modifiers..." : "Recording: \(pendingValue)") : title) {
             isRecording ? stopRecording() : startRecording()
         }
         .onDisappear {
@@ -568,11 +640,18 @@ struct HotkeyRecorderButton: View {
     private func startRecording() {
         stopRecording()
         isRecording = true
+        pendingValue = ""
         monitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { event in
             let value = hotkeyString(from: event.modifierFlags)
             if !value.isEmpty {
-                onRecord(value)
-                stopRecording()
+                pendingValue = value
+                finalizeTimer?.invalidate()
+                finalizeTimer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { _ in
+                    Task { @MainActor in
+                        onRecord(value)
+                        stopRecording()
+                    }
+                }
             }
             return event
         }
@@ -583,6 +662,9 @@ struct HotkeyRecorderButton: View {
             NSEvent.removeMonitor(monitor)
             self.monitor = nil
         }
+        finalizeTimer?.invalidate()
+        finalizeTimer = nil
+        pendingValue = ""
         isRecording = false
     }
 
@@ -715,6 +797,63 @@ struct EnhanceSettingsView: View {
         draftAPIKey = controller.cleanupAPIKey
         draftModel = controller.cleanupModel
         draftPrompt = controller.cleanupPrompt
+    }
+}
+
+struct TranscribeSettingsView: View {
+    @EnvironmentObject private var controller: ASRController
+    @State private var input = ""
+    @State private var output = ""
+    @State private var noCleanup = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                TextField("Audio file path or YouTube/direct media URL", text: $input)
+                Button("Browse...") {
+                    controller.chooseTranscriptionFile()
+                    input = controller.selectedFilePath
+                    output = controller.selectedOutputPath
+                }
+            }
+
+            HStack {
+                TextField("Output transcript path", text: $output)
+                Button("Save As...") {
+                    controller.chooseTranscriptOutput()
+                    output = controller.selectedOutputPath
+                }
+            }
+
+            Toggle("Disable cleanup for this file", isOn: $noCleanup)
+
+            HStack {
+                Button("Transcribe") {
+                    controller.transcribeFileOrURL(input: input, output: output, noCleanup: noCleanup)
+                }
+                Button("Reveal Transcript") {
+                    if !controller.selectedOutputPath.isEmpty {
+                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: controller.selectedOutputPath)])
+                    }
+                }
+            }
+
+            Text(controller.fileTranscriptionStatus)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+
+            ScrollView {
+                Text(controller.fileTranscriptionText)
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+        }
+        .onAppear {
+            input = controller.selectedFilePath
+            output = controller.selectedOutputPath
+        }
     }
 }
 

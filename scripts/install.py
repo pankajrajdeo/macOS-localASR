@@ -146,7 +146,7 @@ case "${{1:-start}}" in
   test-ui)
     exec "$PYTHON" -m macos_local_asr.daemon --test-ui
     ;;
-  config|hotkey|history|health|control|cleanup)
+  config|hotkey|history|health|control|cleanup|transcribe)
     exec "$PYTHON" -m macos_local_asr.cli "$@"
     ;;
   uninstall)
@@ -157,7 +157,7 @@ case "${{1:-start}}" in
     echo "Removed macOS-localASR."
     ;;
   *)
-    echo "Usage: macos-local-asr [start|stop|restart|status|logs|permissions|run|test-ui|config|hotkey|history|health|control|cleanup|uninstall]"
+    echo "Usage: macos-local-asr [start|stop|restart|status|logs|permissions|run|test-ui|config|hotkey|history|health|control|cleanup|transcribe|uninstall]"
     exit 2
     ;;
 esac

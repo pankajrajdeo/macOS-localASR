@@ -28,7 +28,7 @@ macOS-localASR runs a local ONNX INT8 Parakeet ASR model, listens for a global p
   - Accessibility
   - Input Monitoring
 
-Optional for the smoke test only:
+For file/URL transcription and smoke tests:
 
 - `ffmpeg`
 
@@ -100,6 +100,8 @@ For longer dictation:
 ~/bin/macos-local-asr control cancel
 ~/bin/macos-local-asr cleanup models
 ~/bin/macos-local-asr cleanup test "this is a sample dictation"
+~/bin/macos-local-asr transcribe file recording.wav --output transcript.txt
+~/bin/macos-local-asr transcribe url "https://www.youtube.com/watch?v=..." --output transcript.txt
 ~/bin/macos-local-asr config show
 ~/bin/macos-local-asr config get hotkey
 ~/bin/macos-local-asr config set preserve_clipboard true
@@ -180,7 +182,7 @@ Default config:
   "cleanup_model": "",
   "cleanup_api_base": "http://127.0.0.1:11434",
   "cleanup_api_key": "",
-  "cleanup_prompt": "Light cleanup style:\n- Fix punctuation, capitalization, spacing, and obvious ASR slips.\n- Preserve the speaker's wording and meaning.\n- Keep the original language.\n- Do not summarize or rewrite heavily."
+  "cleanup_prompt": "General ASR cleanup style:\n- Produce a readable transcript, not a summary or response.\n- Add sentence punctuation, capitalization, and paragraph breaks only where clearly supported.\n- Preserve the speaker's meaning, wording, order, language, and code-switching.\n- Preserve named entities, technical terms, acronyms, drug names, gene/protein names, product names, measurements, units, dates, times, negation, and uncertainty.\n- Fix only high-confidence ASR slips; if a word or phrase is ambiguous, keep the original wording.\n- Remove only obvious filler words and repeated false starts when they do not change meaning.\n- Do not invent missing content, expand abbreviations, explain, answer questions, or convert the transcript into notes.\n- Output plain text only."
 }
 ```
 
@@ -229,6 +231,24 @@ The app also supports an OpenAI-compatible endpoint:
 For privacy, local Ollama is the preferred default. API keys are currently stored in the local config file, so use a local server or a scoped key until Keychain storage is added.
 
 The visible cleanup prompt is only a style guide. The app adds a hidden safety prefix/suffix that tells the model to treat ASR text as transcript data, not as a question or instruction to answer.
+
+## File and URL Transcription
+
+The menu-bar Settings window includes a `Transcribe` tab for one-off audio/video transcription:
+
+- browse for a local audio/video file, or paste a YouTube/direct media URL
+- choose where to save `transcript.txt`
+- optionally disable cleanup for that file
+- preview the transcript after completion
+
+CLI equivalents:
+
+```bash
+~/bin/macos-local-asr transcribe file /path/to/recording.wav --output ~/Desktop/transcript.txt
+~/bin/macos-local-asr transcribe url "https://www.youtube.com/watch?v=..." --output ~/Desktop/transcript.txt
+```
+
+URL transcription uses `yt-dlp` and `ffmpeg` in a temporary directory. The app writes only the final transcript to the chosen output path; downloaded/converted media is deleted when the job finishes. Only transcribe media that you have the right to access and process.
 
 ## Smoke Test
 
@@ -294,6 +314,7 @@ The current menu-bar MVP supports:
 - optional ASR cleanup through Ollama or OpenAI-compatible APIs
 - modifier-key hotkey recorder
 - history search and stats
+- file and URL transcription to `transcript.txt`
 - health check
 - permissions shortcut
 - worker restart

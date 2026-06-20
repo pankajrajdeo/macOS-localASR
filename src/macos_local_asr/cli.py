@@ -27,6 +27,7 @@ from .configuration import (
     validate_config,
 )
 from .cleanup import CleanupError, cleanup_text, list_cleanup_models
+from .transcription import TranscriptionError, transcribe_source
 
 
 LABEL = os.environ.get("MACOS_LOCAL_ASR_LABEL", "com.pankajrajdeo.macos-local-asr")
@@ -235,6 +236,43 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     raise AssertionError(args.cleanup_action)
 
 
+def cmd_transcribe(args: argparse.Namespace) -> int:
+    config = load_config()
+    source = args.source
+    output_path = Path(args.output).expanduser() if args.output else None
+    cleanup_enabled = False if args.no_cleanup else None
+    try:
+        result = transcribe_source(
+            source,
+            output_path=output_path,
+            config=config,
+            cleanup_enabled=cleanup_enabled,
+        )
+    except TranscriptionError as exc:
+        if args.json:
+            print_json({"ok": False, "error": str(exc), "source": source})
+        else:
+            print(f"Transcription failed: {exc}", file=sys.stderr)
+        return 1
+
+    payload = {
+        "ok": True,
+        "source": result.source,
+        "output_path": str(result.output_path),
+        "text": result.text,
+        "raw_text": result.raw_text,
+        "asr_latency_sec": result.asr_latency_sec,
+        "cleanup_latency_sec": result.cleanup_latency_sec,
+    }
+    if args.json:
+        print_json(payload)
+    else:
+        print(result.text)
+        print()
+        print(f"Wrote {result.output_path}")
+    return 0
+
+
 def launchctl_state() -> tuple[str, str]:
     domain = f"gui/{os.getuid()}/{LABEL}"
     result = subprocess.run(["launchctl", "print", domain], text=True, capture_output=True, check=False)
@@ -369,6 +407,21 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_test = cleanup_sub.add_parser("test", help="Run configured cleanup on sample text.")
     cleanup_test.add_argument("text")
     cleanup.set_defaults(func=cmd_cleanup)
+
+    transcribe = subparsers.add_parser("transcribe", help="Transcribe an audio file or URL to transcript.txt.")
+    transcribe_sub = transcribe.add_subparsers(dest="transcribe_action", required=True)
+    transcribe_file = transcribe_sub.add_parser("file", help="Transcribe a local audio/video file.")
+    transcribe_file.add_argument("source")
+    transcribe_file.add_argument("-o", "--output", help="Output transcript path. Defaults to transcript.txt next to the source.")
+    transcribe_file.add_argument("--json", action="store_true")
+    transcribe_file.add_argument("--no-cleanup", action="store_true", help="Disable cleanup for this transcription.")
+    transcribe_file.set_defaults(func=cmd_transcribe)
+    transcribe_url = transcribe_sub.add_parser("url", help="Transcribe a YouTube or direct media URL.")
+    transcribe_url.add_argument("source")
+    transcribe_url.add_argument("-o", "--output", help="Output transcript path. Defaults to ./transcript.txt.")
+    transcribe_url.add_argument("--json", action="store_true")
+    transcribe_url.add_argument("--no-cleanup", action="store_true", help="Disable cleanup for this transcription.")
+    transcribe_url.set_defaults(func=cmd_transcribe)
 
     health = subparsers.add_parser("health", help="Check installed runtime health.")
     health.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")

@@ -43,6 +43,7 @@ Current MVP features:
 - optional ASR cleanup with Ollama or OpenAI-compatible APIs
 - modifier-key hotkey recorder
 - history search and stats
+- local file and YouTube/direct URL transcription to `transcript.txt`
 - health check
 - permissions shortcut
 - worker restart

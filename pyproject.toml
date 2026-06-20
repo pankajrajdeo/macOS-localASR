@@ -16,6 +16,7 @@ dependencies = [
   "pyobjc-framework-Quartz==12.2.1",
   "sounddevice==0.5.5",
   "webrtcvad-wheels==2.0.14",
+  "yt-dlp>=2025.1.15",
 ]
 
 [project.urls]

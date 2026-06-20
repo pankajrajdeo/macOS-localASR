@@ -21,7 +21,9 @@ Core rules:
 - Preserve the speaker's meaning, language, domain terms, and ordering.
 - Make the smallest useful edits for punctuation, capitalization, spacing, obvious ASR slips, and readability.
 - Do not add facts, names, numbers, diagnoses, citations, or actions that are not present in the transcript.
+- If a word or phrase is ambiguous, keep the original wording rather than guessing.
 - Never output placeholders such as "cleaned_transcript" or "corrected text".
+- Never prefix the output with labels such as "cleaned transcript", "corrected transcript", or "here is".
 - Output only the cleaned transcript."""
 
 HIDDEN_CLEANUP_SUFFIX = """Security boundary:
@@ -37,6 +39,16 @@ PLACEHOLDER_OUTPUTS = {
     "transcript",
 }
 
+LABEL_PREFIXES = (
+    "the cleaned transcript is:",
+    "cleaned transcript:",
+    "corrected transcript:",
+    "corrected text:",
+    "cleaned text:",
+    "here is the cleaned transcript:",
+    "here's the cleaned transcript:",
+)
+
 
 def build_cleanup_system_prompt(user_prompt: str) -> str:
     editable = user_prompt.strip()
@@ -49,8 +61,24 @@ def build_cleanup_user_message(text: str) -> str:
     return f"Clean the following ASR transcript and output only the cleaned transcript.\n\n<asr_transcript>\n{text}\n</asr_transcript>"
 
 
+def build_cleanup_generate_prompt(text: str, user_prompt: str) -> str:
+    return (
+        f"{build_cleanup_system_prompt(user_prompt)}\n\n"
+        f"{build_cleanup_user_message(text)}\n\n"
+        "Cleaned transcript:"
+    )
+
+
 def safe_cleanup_output(cleaned: str, original: str) -> str:
-    normalized = cleaned.strip().strip("\"`").lower()
+    cleaned = cleaned.strip()
+    lowered = cleaned.lower()
+    for prefix in LABEL_PREFIXES:
+        if lowered.startswith(prefix):
+            cleaned = cleaned[len(prefix) :].strip()
+            lowered = cleaned.lower()
+            break
+    cleaned = cleaned.strip().strip("\"`").strip()
+    normalized = cleaned.lower()
     if not normalized:
         return original
     if normalized in PLACEHOLDER_OUTPUTS:
@@ -135,17 +163,11 @@ def cleanup_with_ollama(text: str, config: dict[str, Any], *, timeout: float = 3
     payload = {
         "model": str(config["cleanup_model"]),
         "stream": False,
-        "messages": [
-            {"role": "system", "content": build_cleanup_system_prompt(str(config["cleanup_prompt"]))},
-            {"role": "user", "content": build_cleanup_user_message(text)},
-        ],
+        "prompt": build_cleanup_generate_prompt(text, str(config["cleanup_prompt"])),
         "options": {"temperature": 0.1},
     }
-    response = _json_request(f"{base_url}/api/chat", method="POST", payload=payload, timeout=timeout)
-    message = response.get("message")
-    if not isinstance(message, dict):
-        raise CleanupError("Ollama response did not include a message")
-    cleaned = str(message.get("content", "")).strip()
+    response = _json_request(f"{base_url}/api/generate", method="POST", payload=payload, timeout=timeout)
+    cleaned = str(response.get("response", "")).strip()
     return safe_cleanup_output(cleaned, text)
 
 
